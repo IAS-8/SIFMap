@@ -1,0 +1,71 @@
+# SPDX-FileCopyrightText: © 2025 Forschungszentrum Jülich GmbH
+# SPDX-FileContributor: Armagan Elibol
+# SPDX-FileContributor: Christian Hirt
+# SPDX-FileContributor: Jim Buffat <j.buffat@fz-juelich.de>
+#
+# SPDX-License-Identifier: GPL-3.0-or-later
+
+# Data params
+data_params:
+  dataset_path: "/app/example_data/mixed_crops_13062021/images"
+  result_path: "/app/example_data/mixed_crops_13062021/out"
+  camera_regex:
+    '760': '.*?(C760).*?\.tif$'
+    '757': '.*?(C757).*?\.tif$'
+  datatake_regex: '.*?([0-9_]{23})\.tif$'
+
+
+# Sensor calibration configuration
+sensor_calibration_config: '/app/example_data/mixed_crops_13062021/sensor_calib.yaml'
+
+
+preprocessing_params:
+  load_data: false
+  load_features: false
+  keep_data_in_memory: false
+
+  ransac_residual_threshold: 0.5
+  pairing_min_samples: 30
+  pairing_transform_type: 'projective'  # or affine
+  pairing_master_band: 'Rad757'         # or Rad760
+
+  interpolation_method: 'linear'        # or cubic or nearest
+
+
+registration_params:
+  load: false
+  min_n_correspondences: 10         # keep image pair if there are at least min_n_correspondences
+  min_movement: 0
+  ransac_residual_threshold: 1
+
+
+alignment_params:
+  load: false
+  case: 3                           # 1: 2d w/o outlier removal (or.), 2: 2d w. or., 3: 3d w/o or., 4: 3d w. or.
+  n_outlier_removal: 2              # if manual_residual_removal is false, iterate n_outlier_removal times
+  outlier_threshold: 5              # exclude correspondances with residuals larger than `outlier_threshold` standard deviations
+  manual_outlier_mode: false        # allow manual mode for residual based removal
+  n_points: 30                      # maximum number of correspondences per image pair to be used
+  resume_optimization: false
+  optim_params:
+    xtol: 0.0001
+    ftol: 0.000001
+    x_scale: 'jac'
+
+
+# Feature creation params
+feature_params:
+  n_features_trial: 250             # number of features per image
+  n_SIFT_features_per_image: 20000  # sample n_SIFT_features_per_image SIFT features in each image
+  n_features_threshold: 100         # drop an image if less than n_features_threshold SIFT features are found
+  feature_product: "Rad757"
+  mask: null
+
+
+# Parallelization params
+parallel_params:
+  do_parallel: true                 # setting this to false deactivates the process based parallelization but not threading
+  n_processes: 64                    # -1 will use the all logical cores on your machine
+  n_threads: -1                     # -1 will use numba.config.NUMBA_NUM_THREADS threads
+
+

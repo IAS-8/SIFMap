@@ -1,0 +1,13 @@
+numpy
+joblib
+matplotlib
+numba
+#opencv-python
+opencv-python-headless
+scikit-image
+pyyaml
+psutil
+rasterio
+rioxarray
+scikit-learn
+jupyter

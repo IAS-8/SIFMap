@@ -1,0 +1,29 @@
+# SPDX-FileCopyrightText: © 2025 Forschungszentrum Jülich GmbH
+# SPDX-FileContributor: Armagan Elibol
+# SPDX-FileContributor: Christian Hirt
+# SPDX-FileContributor: Jim Buffat <j.buffat@fz-juelich.de>
+
+version = 1
+
+
+[files]
+license = "GPL-3.0-or-later"
+copyright = "© 2025 Forschungszentrum Jülich GmbH"
+contributors = [
+    "Armagan Elibol",
+    "Christian Hirt",
+    "Jim Buffat <j.buffat@fz-juelich.de>"
+]
+
+
+[files."example_data"]
+license = "CC-BY-NC-ND-4.0" 
+copyright = "© 2024 Forschungszentrum Jülich GmbH"
+contributors = [
+    "Caspar Kneer <casparkneer@gmail.com>",
+]
+
+
+# Exceptions for files that cannot include headers (e.g., binary files)
+[header_exceptions]
+filetypes = ["mat", "tif"]
