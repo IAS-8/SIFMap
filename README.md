@@ -88,3 +88,9 @@ The alignment step is implemented in `align`.
 The visualization step will produce mosaics of SIF and reflectance with pixels selected according to the following aggregation strategies
 * choosing the pixel value from the image with the closest image center 
 * choosing the maximum, mean or minimum value
+
+
+# License
+The software contained in this repository is licensed under GPL-3.0 or later.
+The data under `example_data` is licensed under CC-BY-NC-ND 4.0.
+SIFMap depends on third-party libraries licensed under BSD, MIT, and Apache-2.0.
