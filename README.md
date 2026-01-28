@@ -36,7 +36,7 @@ This includes
 ### Run SIFMap
 To first gain the panel measurements to get the reflectance calibration, call
 ```
-python run_radiance_preprocessing.py config.yaml
+python run_UAV_radiance_preprocessing.py config.yaml
 ```
 
 Read out suitable radiance values over the panels and complete your `sensor_calib.yaml` file. Then, run the full processing chain, calling
