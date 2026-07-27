@@ -27,7 +27,7 @@ from os.path import basename as pbasename
 from SIFcam.data import SIFcam
 from data.utils import timeit, run_jobs, chunk_list, estimate_array_size, write_tif, safe_cast, \
     is_sparse, densify, numba_in_polygon, bicubic_interpolation, bilinear_interpolation, nearest_neighbor_interpolation,\
-    modify_attribute
+    modify_attribute, profile
 from match.utils import interpolation_flags_CV2
 
 from matplotlib.colors import hsv_to_rgb, ListedColormap
@@ -44,8 +44,8 @@ from rasterio.transform import from_origin
 import cv2 
 
 
-@timeit
-def visualize(data, HGlobal, **kwargs):
+@profile()
+def visualize(data, HGlobal, products, aggregation_methods, create_individual_vrts=False, **kwargs):
     """
 
     Args:
@@ -62,15 +62,14 @@ def visualize(data, HGlobal, **kwargs):
     """
     # load images and SIF data to memory
     SIF_list, Ref757_list, Ref760_list = load_data(data)
-    products = dict(sif=SIF_list, ref757=Ref757_list, ref760=Ref760_list)
-    
-    #raise Exception()
+    products_ = dict(sif=SIF_list, ref757=Ref757_list, ref760=Ref760_list)
+    products = dict([p for p in products_.items() if p[0].lower() in products])
 
     # visualize the final mosaic (map), using mean and pixel from closest to the image center
-    aggregates, glob_trfm, HGlobal = aggregate_images(HGlobal, data, products, save_to_mat=True, **kwargs)
+    aggregates, glob_trfm, HGlobal = aggregate_images(HGlobal, data, products, aggregation_methods, save_to_mat=True, **kwargs)
 
     #Create VRT files
-    if False:
+    if create_individual_vrts:
         out_dir = pjoin(data.data.result_path, 'SINGLE_ACQUISITIONS')
         os.makedirs(out_dir, exist_ok=True)
         for i, (h, info) in enumerate(zip(HGlobal, data.images)):
@@ -89,13 +88,6 @@ def visualize(data, HGlobal, **kwargs):
     results_tif = pjoin(data.data.result_path, 'results.tif')
     write_tif(results_tif,
               arr, band_names=band_names, dtype=rio.int16)
-
-    #command = ['gdaladdo', '-r', 'cubic', results_tif]
-    #subprocess.run(command,
-    #               stdout=subprocess.DEVNULL,  # Suppress stdout
-    #               stderr=subprocess.PIPE,     # Capture stderr
-    #               check=True,
-    #               cwd=pdirname(results_tif))
 
     scipy.io.savemat(pjoin(data.data.result_path, 'results.mat'), aggregates)
 
@@ -142,7 +134,7 @@ def plot_and_save(aggregates, result_path, tif_dtype=np.int16):
             plt.colorbar()
 
         else:
-            if 'closest_dist' in key:
+            if 'closest_dist' == key:
                 arr.append(safe_cast(val * 10, tif_dtype, -9999))
                 band_names.append(f'{key} * 10')
 
@@ -161,8 +153,8 @@ def plot_and_save(aggregates, result_path, tif_dtype=np.int16):
     return np.asarray(arr), band_names
 
 
-@timeit
-def aggregate_images(H, data, products, parallel_params=None, parallel_context=None, **kwargs):
+@profile()
+def aggregate_images(H, data, products, aggregation_methods, parallel_params=None, parallel_context=None, **kwargs):
 
     MosaicOrigin = {'X': 0, 'Y': 0}
     MosaicResolution = 1
@@ -180,9 +172,9 @@ def aggregate_images(H, data, products, parallel_params=None, parallel_context=N
     is_covered = get_is_covered(H, coords, np.asarray(data.shapes))
 
     # Get aggregates
-    # @TODO: assume height and width are the same for all images
     agg_px = _aggregate_iterate_px(H, is_covered, coords,
                                    list(products.values()),
+                                   aggregation_methods,
                                    parallel_params=parallel_params,
                                    parallel_context=parallel_context,
                                    **kwargs)
@@ -192,42 +184,24 @@ def aggregate_images(H, data, products, parallel_params=None, parallel_context=N
     px_coords = (coords[px_mask, 0].astype(np.int32), coords[px_mask, 1].astype(np.int32))
 
     n_covering = sparse.csr_matrix((n_covering[px_mask], px_coords), shape=(w, h)).toarray().T
-    closest_id = sparse.csr_matrix((agg_px['all'][:, 0, 8], px_coords), shape=(w, h)).toarray().T
-    closest_dist = sparse.csr_matrix((np.sqrt(agg_px['all'][:, 0, 9]), px_coords), shape=(w, h)).toarray().T
+    closest_id = sparse.csr_matrix((agg_px['all'][:, 0, -2], px_coords), shape=(w, h)).toarray().T
+    closest_dist = sparse.csr_matrix((np.sqrt(agg_px['all'][:, 0, -1]), px_coords), shape=(w, h)).toarray().T
 
     n_covering, closest_id, closest_dist = mask(np.asarray([n_covering, closest_id, closest_dist]),
                                                             (px_coords[1], px_coords[0]), fill_value=np.nan)
 
     result_maps = dict()
     for pid, name in enumerate(products.keys()):
-        min_ = sparse.csr_matrix((agg_px['all'][:, pid, 0], px_coords), shape=(w, h)).toarray().T
-        max_ = sparse.csr_matrix((agg_px['all'][:, pid, 1], px_coords), shape=(w, h)).toarray().T
-        mean_ = sparse.csr_matrix((agg_px['all'][:, pid, 2], px_coords), shape=(w, h)).toarray().T
-        #median_ = sparse.csr_matrix((agg_px['all'][:, pid, 3], px_coords), shape=(w, h)).toarray().T
+        for o, agg in enumerate(aggregation_methods):
+            map_ = sparse.csr_matrix((agg_px['all'][:, pid, o], px_coords), shape=(w, h)).toarray().T
 
-        closest_ = sparse.csr_matrix((agg_px['all'][:, pid, 7], px_coords), shape=(w, h)).toarray().T
-        #closest_masked = sparse.csr_matrix((agg_px['masked'][:, pid, 7], px_coords), shape=(w, h)).toarray().T
+            map_ = mask(map_[None],
+                        (px_coords[1], px_coords[0]),
+                        fill_value=np.nan).squeeze()
 
-        #n_masked = sparse.csr_matrix((agg_px['n_masked'][:, pid], px_coords), shape=(w, h)).toarray().T
+            result_maps.update({f'{agg}_{name}': map_})
 
-        # mask non_covered_pixels
-        res = mask(#np.asarray([mean_, median_, max_, min_, closest_, closest_masked,n_masked]),
-                   np.asarray([mean_, max_, min_, closest_]),
-                   (px_coords[1], px_coords[0]),
-                   fill_value=np.nan)
-        #mean_, median_, max_, min_, closest_, closest_masked, n_masked = res
-        mean_, max_, min_, closest_ = res
-
-        result_maps.update({
-                f'min_{name}': min_,
-                f'max_{name}': max_,
-                f'mean_{name}': mean_,
-         #       f'median_{name}': median_,
-                f'closest_{name}': closest_,
-         #       f'closest_masked_{name}': closest_masked,
-         #       f'n_masked_{name}': n_masked.astype(float),
-              })
-
+        
     result_maps.update({f'n_covering': n_covering.astype(float),
                         f'closest_id': closest_id.astype(float),
                         f'closest_dist' : closest_dist.astype(float)})
@@ -236,7 +210,7 @@ def aggregate_images(H, data, products, parallel_params=None, parallel_context=N
     return result_maps, glob_trfm, H
 
 
-def _aggregate_iterate_px(H, is_covered, coords, products, parallel_params=None, parallel_context=None,
+def _aggregate_iterate_px(H, is_covered, coords, products, aggregation_methods, parallel_params=None, parallel_context=None,
                           interpolation_method='linear', **kwargs):
     if parallel_params is None or not 'n_jobs' in parallel_params or not parallel_params['do_parallel']:
         n_jobs = 1
@@ -256,12 +230,12 @@ def _aggregate_iterate_px(H, is_covered, coords, products, parallel_params=None,
         BigH, k_coords, k_is_covered, products_, included_images = _prep_px(ks, H, coords, covered_px_inds,
                                                                             is_covered, products)
 
-        jobs.append(partial(aggregate_stats_per_px, ks, k_is_covered, BigH, k_coords, products_, included_images,
-                            interpolation_method))
+        jobs.append(partial(aggregate_stats_per_px, ks, k_is_covered, BigH, k_coords, products_, aggregation_methods,
+                            included_images, interpolation_method))
 
         # Estimate RAM footprint of job
         if i == 0:
-            mem = estimate_array_size((len(ks) * len(products), 10), 'float64')['gigabytes'] * 3
+            mem = estimate_array_size((len(ks) * len(products), len(aggregation_methods) + 2), 'float64')['gigabytes'] * 3
 
     # Check max jobs fitting into mem
     max_njobs = max((psutil.virtual_memory().available * 0.9 / 1024 ** 3) // mem, 1)
@@ -279,7 +253,7 @@ def _aggregate_iterate_px(H, is_covered, coords, products, parallel_params=None,
     parallel_out = run_jobs(jobs, **_parallel_params, parallel_context=_parallel_context)
 
     out = dict()
-    keys = ['all', 'masked', 'n_masked']
+    keys = ['all', 'n_masked']
     for i, key in enumerate(keys):
         out[key] = np.concatenate([p[i] for p in parallel_out], axis=0)
 
@@ -289,8 +263,8 @@ def _aggregate_iterate_px(H, is_covered, coords, products, parallel_params=None,
 
 
 @jit(nopython=True, cache=True, parallel=False)
-def aggregate_stats_per_px(ks, px_covers, H, coords, products, image_ids, interpolation_method='linear'):
-    n_vars = 10
+def aggregate_stats_per_px(ks, px_covers, H, coords, products, aggregation_methods, image_ids, interpolation_method='linear'):
+    n_vars = len(aggregation_methods) + 2
     n_prods = len(products)
     stat_list_all = np.ones((len(ks), n_prods, n_vars)) * np.nan
     stat_list_masked = np.ones((len(ks), n_prods, n_vars)) * np.nan
@@ -348,35 +322,74 @@ def aggregate_stats_per_px(ks, px_covers, H, coords, products, image_ids, interp
 
         # Process the pixel values
         if prod_vals.shape[1] > 0:
-            stat_list_all[i] = get_px_stats(prod_vals, cover_image_ids,
+            stat_list_all[i] = get_px_stats(prod_vals, aggregation_methods, cover_image_ids,
                                             dst_to_center, dstThresSQ)
+            
+            # Implementing masking
+            with_masking = False
+            if with_masking:
+                for pid in range(len(prod_vals)):
+                    prod_mask = prod_vals[pid] < 0
+                    n_masked[pid, i] = np.sum(prod_mask)
+                    masked_prod_val_pid = prod_vals[pid][~prod_mask]
 
-            for pid in range(len(prod_vals)):
-                prod_mask = prod_vals[pid] < 0
-                n_masked[pid, i] = np.sum(prod_mask)
-                masked_prod_val_pid = prod_vals[pid][~prod_mask]
+                    if n_masked[pid, i] > 0 and n_masked[pid, i] != prod_vals.shape[1]:
+                        masked_stat_pid = get_px_stats(masked_prod_val_pid[np.newaxis, :], aggregation_methods, cover_image_ids,
+                                                       dst_to_center[~prod_mask], dstThresSQ)
 
-                if n_masked[pid, i] > 0 and n_masked[pid, i] != prod_vals.shape[1]:
-                    masked_stat_pid = get_px_stats(masked_prod_val_pid[np.newaxis, :], cover_image_ids,
-                                                   dst_to_center[~prod_mask], dstThresSQ)
+                        stat_list_masked[i, pid] = masked_stat_pid[0]
 
-                    stat_list_masked[i, pid] = masked_stat_pid[0]
+                    elif n_masked[pid, i] == prod_vals.shape[1]:
+                        stat_list_masked[i, pid] = np.ones(stat_list_all[i, pid].shape) * np.nan
 
-                elif n_masked[pid, i] == prod_vals.shape[1]:
-                    stat_list_masked[i, pid] = np.ones(stat_list_all[i, pid].shape) * np.nan
+                    else:  # n_masked[i] == 0:
+                        stat_list_masked[i, pid] = stat_list_all[i, pid]
 
-                else:  # n_masked[i] == 0:
-                    stat_list_masked[i, pid] = stat_list_all[i, pid]
-
-    return stat_list_all, stat_list_masked, n_masked.transpose()
-
+    return stat_list_all, n_masked.transpose()
 
 @jit(nopython=True, cache=True, parallel=False)
-def get_px_stats(products, image_ids, dist_to_center, dstThresSQ):
+def get_closest(x, dist_to_center):
+    idx = np.argmin(dist_to_center)
+    return x[idx]
+
+@jit(nopython=True, cache=True, parallel=False)
+def get_closest_dist_weighted(x, dist_to_center):
+    tot_weights = np.nansum(1.0 / dist_to_center)
+    if tot_weights > 0:
+        ret = np.nansum(x * (1.0 / dist_to_center**2)) / np.nansum(1.0 / dist_to_center**2)
+
+    else:
+        ret = np.nan
+
+    return ret
+
+@jit(nopython=True, cache=True, parallel=False)
+def aggregate_px(prod, dist_to_center, agg):
+    if agg == "min":
+        return np.nanmin(prod)
+    elif agg == "max":
+        return np.nanmax(prod)
+    elif agg == "mean":
+        return np.nanmean(prod)
+    elif agg == "median":
+        return np.nanmedian(prod)
+    elif agg == "std":
+        return np.nanstd(prod)
+    elif agg == "closest":
+        return get_closest(prod, dist_to_center)
+    elif agg == "closest_dist_weighted":
+        return get_closest_dist_weighted(prod, dist_to_center)
+    else:
+        raise ValueError("Unknown aggregation method")
+
+@jit(nopython=True, cache=True, parallel=False)
+def get_px_stats(products, aggregation_methods, image_ids, dist_to_center, dstThresSQ):
     """
     Compute statistics over all observations from different images in a single pixel.
 
     Args:
+        products:
+        aggregation_methods : min, max, mean, median, std, closest, closest_dist_weighted
         pix_sif_vals: (N, ) SIF observations from different images.
         pix_refl_vals:  (N, ) reflectance observations from different images.
         dist_to_center:
@@ -386,41 +399,24 @@ def get_px_stats(products, image_ids, dist_to_center, dstThresSQ):
         (minimum SIF, maximum  SIF, mean  SIF, median  SIF, std  SIF, distance weighted mean  SIF,\
         mean SIF within dstThresSQ, closest SIF, closest reflectance)
     """
-    stats = np.ones((len(products), 10)) * np.nan
+    stats = np.ones((len(products), len(aggregation_methods) + 2)) * np.nan
 
     for pid, prod in enumerate(products):
-        eps = np.finfo(np.float64).eps
-        valid_dist_ids = np.where(np.logical_and(dist_to_center < (dstThresSQ + eps),
-                                      ~np.isnan(dist_to_center)))[0]
-
         dist_to_center[np.where(np.isnan(prod))] = np.inf
-        mi1 = np.argmin(dist_to_center)
 
         # Compute basic statistics
-        stats[pid, 0:5] = [np.nanmin(prod), np.nanmax(prod),
-                           np.nanmean(prod), np.nanmedian(prod),
-                           np.nanstd(prod)]
+        for o, agg in enumerate(aggregation_methods):
+                stats[pid, o] = aggregate_px(prod, dist_to_center, agg)
 
-        tot_weights = np.nansum(1.0 / dist_to_center)
-        if tot_weights > 0:
-            avg1 = np.nansum(prod * (1.0 / dist_to_center)) / np.nansum(1.0 / dist_to_center)
+        closest_idx = np.argmin(dist_to_center)
+        if 'closest' in aggregation_methods:
+            is_valid = not np.isnan(stats[pid, aggregation_methods.index('closest')])
 
         else:
-            avg1 = np.nan
+            is_valid = not np.isnan(aggregate_px(prod, dist_to_center, 'closest'))
 
-        # clostest center
-        avg3 = prod[mi1]
-
-        if len(valid_dist_ids) > 0:
-            avg2 = np.nanmean(prod[valid_dist_ids])
-        else:
-            avg2 = avg3
-
-        stats[pid, 5:8] = [avg1, avg2, avg3]
-
-        # meta
-        is_valid = not np.isnan(avg3)
-        stats[pid, 8:10] = [image_ids[mi1] if is_valid else np.nan, dist_to_center[mi1] if is_valid else np.nan]
+        stats[pid, -2:] = [image_ids[closest_idx] if is_valid else np.nan,
+                           dist_to_center[closest_idx] if is_valid else np.nan]
 
     return stats
 
@@ -498,22 +494,36 @@ def load_data(data):
     Ref760_list = []
     images = data.images
     for i, img in enumerate(images):
-        #img_list.append(ski.color.rgb2gray((ski.io.imread(img['file_name']))))
         if type(img['Fluo']) is str:
-            SIF_list.append(SIFcam._load(img['Fluo']).squeeze())
+            fluo = SIFcam._load(img['Fluo']).squeeze()
+
+        elif img['Fluo'] is not None:
+            fluo = img['Fluo'].squeeze()
 
         else:
-            SIF_list.append(img['Fluo'].squeeze())
+            continue
 
         if type(img['Refl757']) is str:
-            Ref757_list.append(SIFcam._load(img['Refl757']).squeeze())
+            ref757 = SIFcam._load(img['Refl757']).squeeze()
+
+        elif img['Refl757'] is not None:
+            ref757 = img['Refl757'].squeeze()
+
         else:
-            Ref757_list.append(img['Refl757'].squeeze())
+            continue
 
         if type(img['Refl760']) is str:
-            Ref760_list.append(SIFcam._load(img['Refl760']).squeeze())
+            ref760 = SIFcam._load(img['Refl760']).squeeze()
+
+        elif img['Refl760'] is not None:
+            ref760 = img['Refl760'].squeeze()
+        
         else:
-            Ref760_list.append(img['Refl760'].squeeze())
+            continue
+
+        Ref757_list.append(ref757)
+        Ref760_list.append(ref760)
+        SIF_list.append(fluo)
 
     return (images_to_common_shape(SIF_list), 
 		    images_to_common_shape(Ref757_list),

@@ -9,7 +9,7 @@ import numpy as np
 from match.utils import feature_matcher_flann_init, feature_matcher_flann
 from data.utils import run_jobs
 from functools import partial
-from data.utils import timeit
+from data.utils import timeit, profile
 from joblib import Parallel
 from data.utils import init_with_valid_kwargs
 from contextlib import nullcontext
@@ -51,7 +51,9 @@ def pairwise_image_registration(matches, data, flann, min_n_correspondences, par
         jobs.append(partial(feature_matcher_flann, fea1, fea2, valP1, valP2, 
                             flann=flann,
                             th=flann['ransac_residual_threshold'],
-                            alignment_dim=flann['alignment_dim']))
+                            alignment_dim=flann['alignment_dim'], 
+                            #stop_sample_num=10*min_n_correspondences
+                            ))
 
     # Execute in parallel
     # output is ordered as tformT, status, matchedPoints1, matchedPoints2
@@ -63,7 +65,11 @@ def pairwise_image_registration(matches, data, flann, min_n_correspondences, par
         im2 = int(matches[i][0])
 
         delList = []
-        if (tformT is not None) and (matchedPoints1.shape[0] >= min_n_correspondences):
+        enough_matches = len(matchedPoints1) >= min_n_correspondences \
+                        if not data.is_close_images(im1, im2) \
+                        else True 
+
+        if (tformT is not None) and enough_matches:
             # delete some repeated feature positions
             _, uni1 = np.unique(matchedPoints1, axis=0, return_index=True)
             _, uni2 = np.unique(matchedPoints2, axis=0, return_index=True)
@@ -71,8 +77,8 @@ def pairwise_image_registration(matches, data, flann, min_n_correspondences, par
             nbr = len(matchedPoints1)
             vct = np.arange(nbr)
 
-            delList.extend([np.where(np.in1d(vct, uni2) == False),
-                            np.where(np.in1d(vct, uni1) == False)])
+            delList.extend([np.where(np.isin(vct, uni2) == False),
+                            np.where(np.isin(vct, uni1) == False)])
             delList = np.unique(np.column_stack((delList[0], delList[1])))
 
             matchedPoints1 = np.delete(matchedPoints1, delList, axis=0)
@@ -120,20 +126,21 @@ def coarse_overlapping_image_pair_list_generation(data, flann, parallel_params=N
             fea2 = images[im2]['features'][:n_features_trial, :]
 
             # Prepare parallel execution of
-            # n_matches = featureMatcherFLANNIni(fea1, fea2, flannObj)
-            jobs.append(partial(feature_matcher_flann_init, fea1, fea2, flann))
+            func = partial(feature_matcher_flann_init, fea1, fea2, flann)
+            jobs.append(func)
             inds.append([im1, im2])
 
     # Execute jobs in parallel
     parallel_out = run_jobs(jobs, **parallel_params, parallel_context=parallel_context)
     for n_matches, (im1, im2) in zip(parallel_out, inds):
         # if there is more than 4 matches between image pairs
-        if n_matches >= 4:
+        if n_matches >= 4 or data.is_close_images(im1, im2):
             match_save_list.append([im2, im1, n_matches])
 
     return np.array(match_save_list)
 
-@timeit
+
+@profile()
 def register_images(data, min_n_correspondences, flann, ransac_residual_threshold=0.15,
                     parallel_params=None, min_movement=None, **kwargs):
     """
@@ -172,15 +179,16 @@ def register_images(data, min_n_correspondences, flann, ransac_residual_threshol
                                                                 **kwargs)
 
         # pairwise SIF image registration
-        print("Pairwise SIF image pairs registration starts now using FLANN matching and RANSAC motion estimation")
+        print("Pairwise SIF image pairs registration starts now using FLANN matching and RANSAC motion estimation.",  
+              f"Nr of match possibilities to be checked: {len(matches)}")
         data = pairwise_image_registration(matches, data, flann, min_n_correspondences,
                                            parallel_params=parallel_params,
                                            parallel_context=parallel_context,
                                            **kwargs)
 
     # clean up
-    _ = data.update_matches(min_n_correspondences, min_movement=min_movement)
-
+    _ = data.update_matches(min_n_correspondences=min_n_correspondences,
+                            min_movement=min_movement)
     return data
 
 

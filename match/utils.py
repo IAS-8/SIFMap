@@ -7,17 +7,14 @@
 
 from skimage.transform import warp, AffineTransform, ProjectiveTransform, PiecewiseAffineTransform, \
         SimilarityTransform, ThinPlateSplineTransform
+import skimage
 from skimage.measure import ransac
-from skimage.transform import warp
-from skimage import io, transform
-from scipy.optimize import minimize
-import scipy.ndimage as ndimage
+from packaging.version import Version
 
 import numpy as np
 import cv2
 
 from data.utils import get_flann
-from scipy.spatial._qhull import QhullError
 from match.finetune import finetune_registration
 from match.epipolar import epipolar_pose_and_depth_estimation
 
@@ -39,7 +36,7 @@ def feature_matcher_flann_init(im1, im2, flann=None):
         counter : a number of matched descriptors
     """
     flann = get_flann(flann)
-    matches = flann.knnMatch(im1, im2, k=2)
+    matches = flann.knnMatch(im1.astype(np.float32), im2.astype(np.float32), k=2)
 
     # ratio test as per Lowe's paper
     return np.sum([m.distance < 0.8 * n.distance for i, (m, n) in enumerate(matches)])
@@ -47,7 +44,8 @@ def feature_matcher_flann_init(im1, im2, flann=None):
 
 def feature_matcher_flann(features1, features2, valid_points1, valid_points2,
                           img1=None, img2=None, flann='FLANNBasedMatcher', 
-                          th=0.5, alignment_dim=2, min_samples=4, transform_type=None):
+                          th=0.5, alignment_dim=2, min_samples=4, transform_type=None, 
+                          stop_sample_num=np.inf):
     """
 
     Args:
@@ -66,7 +64,8 @@ def feature_matcher_flann(features1, features2, valid_points1, valid_points2,
 
 
     flann = get_flann(flann)
-    matches = flann.knnMatch(features1, features2, k=2)
+    matches = flann.knnMatch(features1.astype(np.float32), 
+                             features2.astype(np.float32), k=2)
 
     good_matches = []
 
@@ -84,14 +83,6 @@ def feature_matcher_flann(features1, features2, valid_points1, valid_points2,
     min_samples_ransac = 3 * int(alignment_dim <= 2) + 4 * int(alignment_dim > 2)
 
     if transform_type == 'epipolar':
-        #tformT, inliers = ransac(
-        #        (matched_points1, matched_points2), ProjectiveTransform,
-        #        min_samples=3, residual_threshold=th, max_trials=25000 * 5
-        #    )
-        
-        #matched_points1 = matched_points1[inliers]
-        #matched_points2 = matched_points2[inliers]
-
         tformT, inliers, status = epipolar_pose_and_depth_estimation(matched_points1, matched_points2,
                                                                      camera_matrix=camera_matrix, ransac_thresh=th, 
                                                                      img1=img1, img2=img2)
@@ -126,17 +117,32 @@ def feature_matcher_flann(features1, features2, valid_points1, valid_points2,
         # robustly estimate transform model with RANSAC
         tformT, inliers = ransac(
             (matched_points1, matched_points2), model,
-            min_samples=int(min_samples_ransac), residual_threshold=th, max_trials=2500 * 5
+            min_samples=min_samples_ransac, residual_threshold=th, 
+            stop_sample_num=stop_sample_num,
+            max_trials=2500 * 5
         )
 
-        if inliers is not None and np.sum(inliers) > min_samples:
-            matched_points1 = matched_points1[inliers]
-            matched_points2 = matched_points2[inliers]
-            
-            model = model()
-            success = model.estimate(matched_points1, matched_points2)
+        if inliers is not None and np.sum(inliers) > min_samples and tformT:
+            # Order inliers by quality
+            residuals = tformT.residuals(matched_points1, matched_points2)
+            inlier_residuals = residuals[inliers]
+            order = np.argsort(inlier_residuals)
 
-            if transform_type in ('affine', 'projective', 'similarity'):
+            # Sorted inlier points
+            matched_points1 = matched_points1[inliers][order]
+            matched_points2 = matched_points2[inliers][order]
+
+            if Version(skimage.__version__) >= Version("0.26"):
+                model = ProjectiveTransform.from_estimate(
+                    matched_points1,
+                    matched_points2,
+                )
+                success = bool(model)
+            else:
+                model = ProjectiveTransform()
+                success = model.estimate(matched_points1, matched_points2)
+
+            if transform_type in ('affine', 'projective', 'similarity') and success:
                 tformT = np.asarray(model.params)
 
             else:
@@ -159,13 +165,16 @@ def feature_matcher_flann(features1, features2, valid_points1, valid_points2,
     return tformT, status, matched_points1, matched_points2
 
 
-def accurate_image_matcher(Im757, Im760, flann, mask=None, transform_type=None, min_samples=4, 
+def accurate_image_matcher(Im757, Im760, flann, mask=None, transform_type=None, min_samples=4,
                            finetune_metric=False, interpolation_method='linear', n_features=50000):
 
-    thr = 0.5
-    features757, validPoints757, status = run_SIFT(Im757.copy(), n_features) # mask=Im757 > np.quantile(Im757.flatten(), thr))
-    features760, validPoints760, status2 = run_SIFT(Im760.copy(), n_features) # mask=Im760 > np.quantile(Im760.flatten(), thr))
 
+    features757, validPoints757, status = run_SIFT(Im757.copy(), n_features)
+    features760, validPoints760, status2 = run_SIFT(Im760.copy(), n_features)
+    
+    if features757 is None or features760 is None:
+        return None, 1
+    
     tformT, status3, points1, points2 = feature_matcher_flann(features757,
                                                               features760,
                                                               validPoints757,
@@ -179,20 +188,31 @@ def accurate_image_matcher(Im757, Im760, flann, mask=None, transform_type=None, 
                                                               transform_type=transform_type)
     
     if finetune_metric is not None and tformT is not None:
-        #assert transform_type in ('affine', 'projective'), \
-        #        f'Finetuning can only run with transform_type "affine" or "projective", ' \
-        #        f'but you requested "{transform_type}".'
         new_tformT = finetune_registration(Im757, Im760, tformT, transform_type=transform_type,
                                            interpolation_method=interpolation_method,
                                            metric=finetune_metric, points=(points1, points2))
-        status3 = 0  # 2 if np.linalg.det(tformT) < 1e-6 else 0
+        status3 = 0
 
         tformT = new_tformT
     
     return tformT, not(not status and not status2 and not status3)
 
     
-def run_SIFT(Im, nbr, mask=None):
+def run_SIFT(Im, nbr, mask=None, apply_clahe=True, apply_sharpening=True, apply_downscale=True):
+    """
+    This function attempts to create nbr SIFT features in image Im.
+
+    Args:
+        Im: image (numpy array)
+        nbr: number of SIFT features to be created
+        mask: masking the image for feature generation
+        apply_clahe: whether to apply CLAHE before SIFT
+        apply_sharpening: whether to apply sharpening before SIFT
+        apply_downscale: whether to downscale the image by a factor of 0.5 befire SIFT
+
+    Returns:
+
+    """
     status = 0
 
     sift = cv2.SIFT_create(nbr)
@@ -217,11 +237,40 @@ def run_SIFT(Im, nbr, mask=None):
     try:
         if not Im.dtype == np.uint8:
             Im = (255 * normalize(Im)).astype('uint8')
+        
+        if apply_clahe:
+            clahe = cv2.createCLAHE(clipLimit=2, tileGridSize=(8, 8))
+            Im = clahe.apply(Im)
+        
+        if apply_sharpening:
+            blur = cv2.GaussianBlur(Im.astype(float), (0, 0), 1.0)
+            Im = cv2.addWeighted(Im.astype(float), 1.5, blur, -0.5, 0).astype(np.uint8)
+
+        if apply_downscale:
+            scale = 0.5
+            Im = cv2.resize(
+                            Im,
+                            None,
+                            fx=scale,
+                            fy=scale,
+                            interpolation=cv2.INTER_AREA
+                        )
 
         keypoints, features = sift.detectAndCompute(Im, mask)
         points = np.array([keypoint.pt for keypoint in keypoints], dtype=np.float32)
 
-    except Exception:
+        responses = np.array([keypoint.response for keypoint in keypoints], dtype=np.float32)
+        order = np.argsort(responses)[::-1]
+
+        points = np.asarray(points[order])
+        features = np.asarray(features[order])
+
+        if apply_downscale:
+            for i, kp in enumerate(points):
+                points[i][0] /= scale
+                points[i][1] /= scale
+
+    except Exception as e:
         features = None
         points = None
         status = 2

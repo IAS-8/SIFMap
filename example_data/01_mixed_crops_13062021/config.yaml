@@ -1,0 +1,52 @@
+# SPDX-FileCopyrightText: © 2025 Forschungszentrum Jülich GmbH
+# SPDX-FileContributor: Armagan Elibol
+# SPDX-FileContributor: Christian Hirt
+# SPDX-FileContributor: Jim Buffat <j.buffat@fz-juelich.de>
+#
+# SPDX-License-Identifier: GPL-3.0-or-later
+
+data_params:
+  dataset_path: "/app/example_data/01_mixed_crops_13062021/images"
+  result_path: "/app/example_data/01_mixed_crops_13062021/out"
+  camera_regex:
+    '760': '.*?(C760).*?\.tif$'
+    '757': '.*?(C757).*?\.tif$'
+  datatake_regex: '.*?([0-9_]{23})\.tif$'
+
+sensor_calibration_config: 'sensor_calib.yaml'
+
+
+preprocessing_params:
+  load_data: false
+  load_features: false
+  keep_data_in_memory: false
+  ransac_residual_threshold: 0.5
+  pairing_min_samples: 30
+  pairing_transform_type: 'projective'
+  interpolation_method: 'linear'
+
+
+registration_params:
+  load: false
+  min_n_correspondences: 10
+  min_movement: null
+  ransac_residual_threshold: 5
+
+
+alignment_params:
+  load: false
+  n_outlier_removal: 5
+  n_points: 30
+  optim_params:
+    xtol: 0.00001
+    ftol: 0.000001
+
+
+parallel_params:
+  do_parallel: true
+  n_processes: null 
+  n_threads: null
+
+
+vis_params:
+  interpolation_method: 'cubic'

@@ -10,7 +10,7 @@ import scipy.optimize as scopt
 from joblib import Parallel
 
 from align.calc import calculate_homography_3d, vector_to_affine_homography
-from align.jacobians import global_3d_jacobian
+from align.jacobians import global_3d_jacobian, _get_index_for_3d_jacobian
 from data.geometry import rotmat2quat
 from data.utils import init_with_valid_kwargs, convert_to_numba_list_of_lists
 
@@ -22,6 +22,7 @@ def optimize_alignment_3d(K, data,
                           RTs=None, x=None, parallel_context=None, parallel_params=None,
                           optim_params=None, **kwargs):
     """
+    Manages the optimization of the symmetric transfer error under 3d motion models.
 
     Args:
         K (): camera instrinsics
@@ -81,29 +82,25 @@ def optimize_alignment_3d(K, data,
     QY = QX + 1
     QZ = QY + 1
 
-    def cost3d(x, data, K, parallel_context):
-        return cost_alignment_3d(x, QX, QY, QZ, data, K, parallel_context=parallel_context)
+    def cost3d(x, K, match_matrix, matches, *args, **kwargs): 
+        return cost_alignment_3d(x, QX, QY, QZ, K, match_matrix, matches)
 
-    _optim_params = dict(verbose=2, x_scale='jac', bounds=bou, xtol=1e-3, ftol=1e-6)
-
-    if optim_params is not None:
-        _optim_params.update(optim_params)
-
-    if parallel_context is None and parallel_params['do_parallel']:
-        context = init_with_valid_kwargs(Parallel, **parallel_params)
-    
-    elif not parallel_params['do_parallel']:
-        context = None
-
-    res = scopt.least_squares(fun=cost3d, x0=x, jac=global_3d_jacobian, args=(data, K, context), **_optim_params)
+    match_matrix = convert_to_numba_list_of_lists(data.match_matrix)
+    matches = data.matches
+    index = _get_index_for_3d_jacobian(matches)
+    res = scopt.least_squares(fun=cost3d, x0=x, jac=global_3d_jacobian,
+                              args=(K, match_matrix, matches, index), **optim_params)
 
     x = res.x
     iHw, wHi = calculate_homography_3d(x, K)
     return iHw0, wHi0, iHw, wHi, x, res['fun'], parallel_context
 
 
-def cost_alignment_3d(x, QX, QY, QZ, data, K, parallel_context=None):
+@jit(nopython=True, cache=True, parallel=True)
+def cost_alignment_3d(x, QX, QY, QZ, K, match_matrix, matches):
     """
+    Defines the symmetric transfer error computed from quaternion matrices
+    representing the 3d motion.
 
     Args:
         x (): motion paramaters of all images in a vector format
@@ -136,22 +133,20 @@ def cost_alignment_3d(x, QX, QY, QZ, data, K, parallel_context=None):
         val = np.sqrt(np.square(qd[:, 1]) + np.square(qd[:, 2]) + np.square(qd[:, 3])) - 1.0
 
         qd[:, 0] = np.cos(np.arcsin(val))
-        qd = np.where(np.abs(qd) < np.finfo(float).eps, 0, qd)
+        qd = np.where(np.abs(qd) < 1e-12, 0, qd)
         Norms = np.sqrt(np.square(qd[:, 0]) + np.square(qd[:, 1]) + np.square(qd[:, 2]) + np.square(qd[:, 3]))
 
         xi[QX[Idx]] = np.divide(qd[:, 1], Norms)
         xi[QY[Idx]] = np.divide(qd[:, 2], Norms)
         xi[QZ[Idx]] = np.divide(qd[:, 3], Norms)
 
-    iHw, wHi = calculate_homography_3d(xi, K)
-
-    match_matrix = convert_to_numba_list_of_lists(data.match_matrix)
-    residuals = point_match_residual_3d(iHw, wHi, match_matrix, data.matches)
+    iHw, wHi = calculate_homography_3d(xi, K) 
+    residuals = point_match_residual_3d(iHw, wHi, match_matrix, matches)
 
     return residuals
 
 
-@jit(nopython=True, cache=True, parallel=False)
+@jit(nopython=True, cache=True, parallel=True)
 def point_match_residual_3d(iHw, wHi, match_matrix, matches):
     """
 
@@ -220,6 +215,7 @@ def point_match_residual_3d(iHw, wHi, match_matrix, matches):
 
 def point_match_residual_2d(x, data, xext=None):
     """
+    Defines the symmetric transfer error computed under 2d motion.
 
     Args:
         x (): vector composed of motion parameters
@@ -232,13 +228,7 @@ def point_match_residual_2d(x, data, xext=None):
     matches = data.matches
     n_images = data.match_matrix.shape[0]
 
-    # include first homography as an identity mapping, first image frame is mosaic frame
-    if xext is None :
-        xext = [1, 0, 0, 0, 1, 0]
-
-    xext = np.concatenate((xext, x))
-
-    H = vector_to_affine_homography(xext)
+    H = vector_to_affine_homography(x)
 
     match_matrix = convert_to_numba_list_of_lists(data.match_matrix)
     r = _point_match_residual_2d(H, match_matrix, matches)

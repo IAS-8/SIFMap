@@ -7,33 +7,25 @@
 
 import glob
 import os
+os.environ["OPENCV_LOG_LEVEL"] = "ERROR"
 import re
 import cv2
 import yaml
 
-import joblib 
 from joblib import Parallel
 
 import numpy as np
 import scipy.io as scio
 from os.path import join as pjoin
-from os.path import dirname as pdirname
-from os.path import basename as pbasename
-
-import sklearn
-from sklearn.pipeline import Pipeline
 
 from skimage import io, transform
 from skimage.transform import warp
-from scipy.optimize import curve_fit, minimize
-from scipy.ndimage import gaussian_filter
 import scipy.ndimage as ndimage
-from scipy.ndimage import map_coordinates
 
 from match.epipolar import epipolar_warp
 from match.utils import accurate_image_matcher, run_SIFT, interpolation_flags_CV2, interpolation_flags_skimage
 from data.data import _ImageData
-from data.utils import run_jobs, init_with_valid_kwargs, replace_ext, write_tif
+from data.utils import run_jobs, init_with_valid_kwargs, replace_ext, write_tif, profile
 from data.utils import get_from_dict, extract_patches, reconstruct_from_patches, cast_to_int_type
 
 from functools import partial
@@ -41,10 +33,13 @@ from contextlib import nullcontext
 
 import warnings
 from scipy.optimize import OptimizeWarning
+from rasterio.errors import NotGeoreferencedWarning
 warnings.filterwarnings("ignore", message=".*low contrast image.*")
 warnings.filterwarnings("ignore", category=RuntimeWarning, message="Mean of empty slice")
 warnings.filterwarnings("ignore", category=OptimizeWarning, message="Covariance of the parameters could not be estimated")
-
+warnings.filterwarnings("ignore", message="No inliers found.", category=UserWarning, module=r"skimage\.measure\.fit")
+warnings.filterwarnings("ignore", message="invalid value encountered in cast", category=RuntimeWarning)
+warnings.filterwarnings("ignore", message="Dataset has no geotransform", category=NotGeoreferencedWarning)
 
 def clean_dictionary(d):
     """
@@ -70,7 +65,8 @@ class SIFcam(_ImageData):
                  datatake_regex='', ransac_residual_threshold=0.5, feature_product='Rad757',
                  feature_mask=None, interpolation_method='linear', rescale_interpolation_method='linear', 
                  pairing_min_samples=20, pairing_transform_type='affine', radiance_gaussian_blur=None, 
-                 pairing_finetune_metric='ssd', pairing_master_band='Rad757', **kwargs):
+                 pairing_finetune_metric='ssd', pairing_master_band='Rad757', sif_computation_method='fld', 
+                 pairing_optical_flow_refinement=None, mask=None, **kwargs):
 
         super().__init__()
         self.BASE_KEYS += ['OrgRad760', 'OrgRad757',
@@ -97,12 +93,17 @@ class SIFcam(_ImageData):
         self.pairing_transform_type = pairing_transform_type
         self.pairing_finetune_metric = pairing_finetune_metric
         self.pairing_master_band = pairing_master_band
+        self.pairing_optical_flow_refinement = pairing_optical_flow_refinement
+
+        self.sif_computation_method = sif_computation_method
 
         if parallel_params is None:
             parallel_params = dict(do_parallel=False)
         self.parallel_params = parallel_params
         
         self.sensor_params = self.sensor_setup(**sensor_params)
+        self.sensor_params.update(kwargs)
+
         self._ids, self._paths, self._dark = self.read_paths(dataset_path, self.sensor_params['DarkPath'],
                                                              camera_regex, datatake_regex)
         self.dark757, self.dark760 = SIFcam.dark_computation(self.sensor_params['DarkPath'], self._dark)
@@ -303,14 +304,19 @@ class SIFcam(_ImageData):
 
         """
         with open(sensor_calibration_config, 'r') as file:
+            print('\nLOADING SENSOR CALIB', sensor_calibration_config, '\n')
             config = yaml.safe_load(file)
+
+        with open(pjoin(os.path.dirname(__file__), '../config/default_sensor_calib.yaml'), 'r') as file:
+            default = yaml.safe_load(file)
 
         required_sensor_params = ('flat_field', 'radiance_calibration',
                                   'dark_acquisitions', 'KMat',
                                   'reflectance_calibration',
                                   'integration_times', 'mask',
                                   )
-        sensor_params = get_from_dict(config, required_sensor_params)
+        sensor_params = get_from_dict(default, required_sensor_params, need_all=True)
+        sensor_params.update(get_from_dict(config, required_sensor_params))
 
         sensor_params.update(KMat=np.asarray(sensor_params['KMat']))
 
@@ -371,7 +377,7 @@ class SIFcam(_ImageData):
         sensor_params['mask'] = {"757": clean_dictionary(sensor_params['mask']['757']),
                                  "760": clean_dictionary(sensor_params['mask']['760'])} \
                                  if sensor_params['mask'] is not None else None
-        
+
         sensor_params['interpolation_method'] = self.interpolation_method
         sensor_params['rescale_interpolation_method'] = self.rescale_interpolation_method
         sensor_params['radiance_gaussian_blur'] = self.radiance_gaussian_blur
@@ -379,7 +385,10 @@ class SIFcam(_ImageData):
         sensor_params['pairing_min_samples'] = self.pairing_min_samples
         sensor_params['pairing_transform_type'] = self.pairing_transform_type
         sensor_params['pairing_finetune_metric'] = self.pairing_finetune_metric
-        
+        sensor_params['pairing_optical_flow_refinement'] = self.pairing_optical_flow_refinement
+
+        sensor_params['sif_computation_method'] = self.sif_computation_method
+
         return sensor_params
 
     def remove(self, remove):
@@ -405,7 +414,7 @@ class SIFcam(_ImageData):
     def compute_radiance(self, *args, **kwargs):
         return self.compute(*args, **kwargs, process_only_radiance=True)
 
-    def compute(self, load_data=True, load_features=True, write=True, keep_data_in_memory=True, **kwargs):
+    def compute(self, load_data=True, load_features=True, write=True, keep_data_in_memory=True, write_nonmatched=True, **kwargs):
         """
         This function runs the logic of this class by (i) creating a worker pool (ii) running he preprocessing and (iii)
         creating the features.
@@ -442,8 +451,10 @@ class SIFcam(_ImageData):
             self.remove(remove)
 
         return self
-
-    def preprocess(self, load=True, write=True, keep_data_in_memory=False, parallel_context=None, process_only_radiance=False):
+    
+    @profile()
+    def preprocess(self, load=True, write=True, write_nonmatched=True, keep_data_in_memory=False, parallel_context=None, 
+                   process_only_radiance=False):
         """
         Runs the preprocessing. (i) Radiance is flat fielded and calibrated. (ii) Reflectance and SIF are derived.
 
@@ -457,7 +468,7 @@ class SIFcam(_ImageData):
 
         """
         # Run Radiance Processing Pipeline
-        self._data, remove = self._process_radiance(load=load, write=write,
+        self._data, remove = self._process_radiance(load=load, write=write, write_nonmatched=write_nonmatched,
                                                     keep_data_in_memory=keep_data_in_memory,
                                                     parallel_context=parallel_context)
         
@@ -471,7 +482,7 @@ class SIFcam(_ImageData):
             return self._data
 
         # Run Reflectance and Fluorescence Processing Pipeline
-        self._data, remove = self._process_reflectance_fluorescence(load=load, write=write,
+        self._data, remove = self._process_reflectance_fluorescence(load=load, write=write, write_nonmatched=write_nonmatched,
                                                                     keep_data_in_memory=keep_data_in_memory,
                                                                     parallel_context=parallel_context)
         self.remove(remove)
@@ -479,7 +490,8 @@ class SIFcam(_ImageData):
         self._is_initialized = True
 
         return self._data
-
+    
+    @profile()
     def process_features(self, parallel_context=None, write=True, load=True, keep_data_in_memory=False,
                          n_SIFT_features_per_image=10000, n_features_threshold=100, feature_product='Rad757',
                          feature_mask=None, **kwargs):
@@ -508,8 +520,8 @@ class SIFcam(_ImageData):
         return save_data, remove
 
     @staticmethod
-    def process_reflectance_fluorescence(pair_data, sensor_params, load, write, keep_data_in_memory,
-                                         path760, path757, out_path):
+    def process_reflectance_fluorescence(pair_data, sensor_params, load, write, write_nonmatched, 
+                                         keep_data_in_memory, path760, path757, out_path):
         do_remove = False
 
         # Prepare saving REFLECTANCE
@@ -517,6 +529,11 @@ class SIFcam(_ImageData):
         path760_ = replace_ext(pjoin(base, os.path.basename(path760)))
         path757_ = replace_ext(pjoin(base, os.path.basename(path757)))
         refl_paths = [path760_, path757_]
+
+        base_nonmatched = pjoin(out_path, 'REFLECTANCE_nonmatched')
+        path760_ = replace_ext(pjoin(base_nonmatched, os.path.basename(path760)))
+        path757_ = replace_ext(pjoin(base_nonmatched, os.path.basename(path757)))
+        refl_paths_nm = [path760_, path757_]
 
         # Prepare saving IRRADIANCE
         base = pjoin(out_path, 'IRRADIANCE')
@@ -536,6 +553,12 @@ class SIFcam(_ImageData):
         path760_ = replace_ext(pjoin(base, os.path.basename(path760)))
         path757_ = replace_ext(pjoin(base, os.path.basename(path757)))
         rad_paths = [path760_, path757_]
+        
+        base_nonmatched = pjoin(out_path, 'RADIANCE_nonmatched')
+        path760_nm = replace_ext(pjoin(base_nonmatched, os.path.basename(path760)))
+        path757_nm = replace_ext(pjoin(base_nonmatched, os.path.basename(path757)))
+        rad_paths_nm = [path760_nm, path757_nm]
+
 
         all_out_paths = irr_paths + rad_paths + [fluo_path]
 
@@ -552,16 +575,29 @@ class SIFcam(_ImageData):
             _, pair_data['Irr757'], pair_data['Refl757'] = SIFcam.process_reflectance(pair_data['Rad757'],
                                                                                       sensor_params['panel_vals_757'],
                                                                                       reflectance_reference=sensor_params['ref_vals_757'])
+
+            if write_nonmatched:
+                _, _, pair_data['Refl760_nonmatched'] = SIFcam.process_reflectance(pair_data['Rad760_nonmatched'],
+                                                                                          sensor_params['panel_vals_760'],
+                                                                                          reflectance_reference=sensor_params['ref_vals_760'])
+
+                _, _, pair_data['Refl757_nonmatched'] = SIFcam.process_reflectance(pair_data['Rad757_nonmatched'],
+                                                                                          sensor_params['panel_vals_757'],
+                                                                                          reflectance_reference=sensor_params['ref_vals_757'])
             ##########################################################
 
             ############# Compute Fluorescence
-            pair_data = SIFcam.process_fluorescence(pair_data)
+            pair_data = SIFcam.process_fluorescence(pair_data, mode=sensor_params['sif_computation_method'])
             #########################################################
 
             # IO
             if write or not keep_data_in_memory:
                 # SAVE REFLECTANCE
                 SIFcam._save([pair_data['Refl760'], pair_data['Refl757']], refl_paths)
+                
+                if write_nonmatched:
+                    SIFcam._save([pair_data['Refl760_nonmatched'], pair_data['Refl757_nonmatched']], refl_paths_nm)
+
 
                 # SAVE IRRADIANCE
                 SIFcam._save([pair_data['Irr760'], pair_data['Irr757']], irr_paths)
@@ -573,10 +609,12 @@ class SIFcam(_ImageData):
                 SIFcam._save([pair_data['Fluo']], [fluo_path])
 
             if not keep_data_in_memory:
-                dels = [('Refl760', refl_paths[0]), ('refl757', refl_paths[1]),
+                dels = [('Refl760', refl_paths[0]), ('Refl757', refl_paths[1]),
+                        ('Refl760_nonmatched', refl_paths_nm[0]), ('Refl757_nonmatched', refl_paths_nm[1]),
                         ('Irr760', irr_paths[0]), ('Irr757', irr_paths[1]),
                         ('Fluo', fluo_path), ('Rad760', rad_paths[0]),
-                        ('Rad757', rad_paths[1])]
+                        ('Rad757', rad_paths[1]), ('Rad760_nonmatched', rad_paths_nm[0]),
+                        ('Rad757_nonmatched', rad_paths_nm[1])]
                         # ('ReflMap', refl_map_path),
 
                 for key, val in dels:
@@ -599,10 +637,11 @@ class SIFcam(_ImageData):
 
         else:
             dels = [('Refl760', refl_paths[0]), ('Refl757', refl_paths[1]),
-                    ('Irr760', irr_paths[0]), ('Irr757', irr_paths[1]),
-                    ('Fluo', fluo_path), ('Rad760', rad_paths[0]),
-                    ('Rad757', rad_paths[1])]
-                    # ('ReflMap', refl_map_path),
+                        ('Refl760_nonmatched', refl_paths_nm[0]), ('Refl757_nonmatched', refl_paths_nm[1]),
+                        ('Irr760', irr_paths[0]), ('Irr757', irr_paths[1]),
+                        ('Fluo', fluo_path), ('Rad760', rad_paths[0]),
+                        ('Rad757', rad_paths[1]), ('Rad760_nonmatched', rad_paths_nm[0]),
+                        ('Rad757_nonmatched', rad_paths_nm[1])]
 
             for key, val in dels:
                 pair_data[key] = val
@@ -610,23 +649,28 @@ class SIFcam(_ImageData):
         return pair_data, do_remove
 
     @staticmethod
-    def process_fluorescence(pair_data, vegetation_threshold_757=None):
-        ######## Fluorescence Computation
-        subsI = np.subtract(pair_data['Irr757'], pair_data['Irr760']) # I0 - I1
-        subsRe = np.subtract(pair_data['Refl760'], pair_data['Refl757']) # Re1 - Re0
-        subsRa = np.subtract(pair_data['Rad757'], pair_data['Rad760']) # Ra0 - Ra1
-        CRatio = np.divide(np.multiply(pair_data['Irr760'], pair_data['Irr757']), subsI) # I0 I1 / (I0 - I1)
+    def process_fluorescence(pair_data, mode='fld'):
 
-        # (Re1 - Re0) I0 I1 / (I0 - I1)
-        # = (Ra1 / I1 * (I0 I1) - Ra0 / I0 * (I0 I1)) / (I0 - I1)
-        # = (Ra1 I0 - Ra0 I1) / (I0 - I1) = Fluo
-        pair_data['Fluo'] = np.multiply(subsRe, CRatio)
+        if mode == 'fld':
+            ######## Fluorescence Computation
+            subsI = np.subtract(pair_data['Irr757'], pair_data['Irr760']) # I0 - I1
+            subsRe = np.subtract(pair_data['Refl760'], pair_data['Refl757']) # Re1 - Re0
+            subsRa = np.subtract(pair_data['Rad757'], pair_data['Rad760']) # Ra0 - Ra1
+            CRatio = np.divide(np.multiply(pair_data['Irr760'], pair_data['Irr757']), subsI) # I0 I1 / (I0 - I1)
 
-        # (Ra0 - Ra1) / (I0 - I1)
-        # = (Re0 I0 - Re1 I1) / (I0 - I1)
-        # = ReflMap
-        #  pair_data['ReflMap'] = np.abs(np.divide(subsRa, subsI))
-        ###################################################
+            # (Re1 - Re0) I0 I1 / (I0 - I1)
+            # = (Ra1 / I1 * (I0 I1) - Ra0 / I0 * (I0 I1)) / (I0 - I1)
+            # = (Ra1 I0 - Ra0 I1) / (I0 - I1) = Fluo
+            pair_data['Fluo'] = np.multiply(subsRe, CRatio)
+
+            # (Ra0 - Ra1) / (I0 - I1)
+            # = (Re0 I0 - Re1 I1) / (I0 - I1)
+            # = ReflMap
+            #  pair_data['ReflMap'] = np.abs(np.divide(subsRa, subsI))
+            ###################################################
+
+        else:
+            raise NotImplementedError('Only FLD is implemented (set sif_computation_method="fld")')
 
         return pair_data
 
@@ -651,8 +695,92 @@ class SIFcam(_ImageData):
         return Rad, Irr, Refl
 
     @staticmethod
-    def process_radiance(pair_data, sensor_params, flann, load, write, keep_data_in_memory,
-                         path760, path757, pairing_master_band, out_path):
+    def process_align_bands(pair_data, sensor_params, flann, mask=None):
+        ############ Get transform between the two bands
+        HtMat, status = accurate_image_matcher(pair_data['Rad757'].copy(),
+                                               pair_data['Rad760'].copy(),
+                                               flann, mask=mask,
+                                               transform_type=sensor_params['pairing_transform_type'],
+                                               min_samples=sensor_params['pairing_min_samples'],
+                                               finetune_metric=sensor_params['pairing_finetune_metric'],
+                                               interpolation_method=sensor_params['interpolation_method'])
+
+        if status != 0:
+            return None, status
+
+        ############ Apply transform to the two bands
+        pair_data['Rad757'], pair_data['Rad760'], status \
+            = SIFcam.process_homography_pairing(pair_data['Rad757'],
+                                                pair_data['Rad760'],
+                                                interpolation_method=sensor_params['interpolation_method'],
+                                                rescale_interpolation_method=sensor_params['rescale_interpolation_method'],
+                                                H=HtMat, transform_type=sensor_params['pairing_transform_type'])
+
+        pair_data['HtMat'] = HtMat
+        
+
+        ########### Optical flow refinement
+        if sensor_params['pairing_optical_flow_refinement'] is not None:
+            # 757 channel is to be warped
+            gray1 = ((pair_data['Rad757'] - np.nanmin(pair_data['Rad757'])) \
+                        / (np.nanmax(pair_data['Rad757']) - np.nanmin(pair_data['Rad757'])) * 256)#.astype(np.uint8)
+            gray2 = ((pair_data['Rad760'] - np.nanmin(pair_data['Rad760'])) \
+                        / (np.nanmax(pair_data['Rad760']) - np.nanmin(pair_data['Rad760'])) * 256)#.astype(np.uint8)
+        
+            gray1[np.isnan(gray1)] = 0
+            gray2[np.isnan(gray2)] = 0
+
+            if sensor_params['pairing_optical_flow_refinement'] == 'farneback':
+                flow = SIFcam.optical_flow_farneback(gray1, gray2)
+
+            else:
+                raise NotImplementedError()
+
+            pair_data['Rad757'] = SIFcam.align_w_flow(pair_data['Rad757'], flow, 
+                                                      interpolation_flags_CV2[sensor_params['interpolation_method']])
+
+        return pair_data, status
+
+    @staticmethod
+    def align_w_flow(arr, flow, interpolation_flag):
+        h, w = arr.shape
+        xx, yy = np.meshgrid(
+                np.arange(w),
+                np.arange(h)
+            )
+
+        map_x = (xx - flow[:, :, 0]).astype(np.float32)
+        map_y = (yy - flow[:, :, 1]).astype(np.float32)
+
+        aligned = cv2.remap(
+            arr,
+            map_x,
+            map_y,
+            interpolation_flag 
+            )
+
+        return aligned
+
+    @staticmethod
+    def optical_flow_farneback(image1, image2):
+        flow = cv2.calcOpticalFlowFarneback(
+            image1,
+            image2,
+            None,
+            pyr_scale=0.5,
+            levels=5,
+            winsize=25,
+            iterations=5,
+            poly_n=7,
+            poly_sigma=1.5,
+            flags=0
+        )
+        
+        return flow 
+
+    @staticmethod
+    def process_radiance(pair_data, sensor_params, flann, load, write, write_nonmatched, 
+                         keep_data_in_memory, path760, path757, pairing_master_band, out_path):
 
         do_remove = False
 
@@ -660,6 +788,11 @@ class SIFcam(_ImageData):
         path760_ = replace_ext(pjoin(base, os.path.basename(path760)))
         path757_ = replace_ext(pjoin(base, os.path.basename(path757)))
         rad_paths = [path760_, path757_]
+
+        base_nonmatched = pjoin(out_path, 'RADIANCE_nonmatched')
+        path760_nm = replace_ext(pjoin(base_nonmatched, os.path.basename(path760)))
+        path757_nm = replace_ext(pjoin(base_nonmatched, os.path.basename(path757)))
+        rad_paths_nm = [path760_nm, path757_nm]
 
         if not load or not np.all([os.path.exists(p) for p in rad_paths]):
             ############ Load data paths
@@ -689,15 +822,17 @@ class SIFcam(_ImageData):
  
             ############ Calibrate radiance to physical units
             pair_data['Rad757'] = SIFcam.calibrate_radiance(pair_data['rawRad757'], sensor_params['FFmap757'],
-                                                   sensor_params['Int757'], sensor_params['g757'])
+                                                            sensor_params['Int757'], sensor_params['g757'])
             pair_data['Rad760'] = SIFcam.calibrate_radiance(pair_data['rawRad760'], sensor_params['FFmap760'],
-                                                   sensor_params['Int760'], sensor_params['g760'])
+                                                            sensor_params['Int760'], sensor_params['g760'])
 
 
             pair_data['Rad757'], pair_data['Rad760'] = SIFcam.gaussian_blurring(pair_data['Rad757'], pair_data['Rad760'],
                                                                                 gaussian_blur=sensor_params['radiance_gaussian_blur'])
+
+            #Pass along nonmatched radiance
+            pair_data['Rad757_nonmatched'], pair_data['Rad760_nonmatched']  = pair_data['Rad757'].copy(), pair_data['Rad760'].copy()
             
-            # We will warp Im757 onto Im760, so we'll need to estimate the loss in sharpness on this image
             assert pairing_master_band in ('Rad757', 'Rad760'), ('Param master_band must be "Rad757" or "Rad760, '
                                                          f'but found {pairing_master_band}"')
 
@@ -707,18 +842,10 @@ class SIFcam(_ImageData):
                 pair_data['Rad757'] = pair_data['Rad760'].copy()
                 pair_data['Rad760'] = _band757
 
+            ############ Match bands
+            pair_data_updated, status = SIFcam.process_align_bands(pair_data, sensor_params, flann)
 
-            ############ Get transform between the two bands
-            #mask = ~create_circular_mask(pair_data['Rad760'].shape[0], pair_data['Rad760'].shape[0] * 0.4) 
-            mask = None 
-            HtMat, status = accurate_image_matcher(pair_data['Rad757'].copy(), 
-                                                   pair_data['Rad760'].copy(),
-                                                   flann, mask=mask, 
-                                                   transform_type=sensor_params['pairing_transform_type'], 
-                                                   min_samples=sensor_params['pairing_min_samples'], 
-                                                   finetune_metric=sensor_params['pairing_finetune_metric'], 
-                                                   interpolation_method=sensor_params['interpolation_method'])
-
+            ############ Catch exceptions
             if status != 0:
                 pair_data['Rad760'], pair_data['Rad757'] = None, None
                 pair_data['rawRad760'], pair_data['rawRad757'] = None, None
@@ -728,24 +855,9 @@ class SIFcam(_ImageData):
 
                 return pair_data, do_remove
 
-            ############ Apply transform to the two bands 
-            pair_data['Rad757'], pair_data['Rad760'], status \
-                                = SIFcam.process_pairing(pair_data['Rad757'],
-                                                         pair_data['Rad760'],
-                                                         interpolation_method=sensor_params['interpolation_method'],
-                                                         rescale_interpolation_method=sensor_params['rescale_interpolation_method'],
-                                                         H=HtMat, transform_type=sensor_params['pairing_transform_type'])
-            
-            if status != 0:
-                pair_data['Rad760'], pair_data['Rad757'] = None, None
-                pair_data['rawRad760'], pair_data['rawRad757'] = None, None
+            else:
+                pair_data = pair_data_updated
 
-                pair_data['FAILURE'] = 'BAND_MATCHING'
-                do_remove = True
-
-                return pair_data, do_remove
-
-            
             ############ Switch back order
             if pairing_master_band == 'Rad757':
                 _band760 = pair_data['Rad757'].copy()
@@ -753,16 +865,20 @@ class SIFcam(_ImageData):
                 pair_data['Rad760'] = _band760
 
             ############ Save to disk
-            pair_data['HtMat'] = HtMat
             pair_data['shape'] = pair_data['Rad760'].shape
 
             if write or not keep_data_in_memory:
                 SIFcam._save([pair_data['Rad760'], pair_data['Rad757']], rad_paths)
+                
+                if write_nonmatched:
+                    SIFcam._save([pair_data['Rad760_nonmatched'], pair_data['Rad757_nonmatched']], rad_paths_nm)
 
                 # delete loaded radiances if load is False
                 if not keep_data_in_memory:
                     pair_data['Rad760'] = rad_paths[0]
                     pair_data['Rad757'] = rad_paths[1]
+                    pair_data['Rad760_nm'] = rad_paths[0]
+                    pair_data['Rad757_nm'] = rad_paths[1]
 
                     del pair_data['rawRad760']
                     del pair_data['rawRad757']
@@ -770,6 +886,8 @@ class SIFcam(_ImageData):
         elif load and keep_data_in_memory:
             pair_data['Rad760'] = SIFcam._load(rad_paths[0]).astype(float)
             pair_data['Rad757'] = SIFcam._load(rad_paths[1]).astype(float)
+            pair_data['Rad760_nonmatched'] = SIFcam._load(rad_paths_nm[0]).astype(float)
+            pair_data['Rad757_nonmatched'] = SIFcam._load(rad_paths_nm[1]).astype(float)
 
             pair_data['shape'] = pair_data['Rad760'].shape
 
@@ -777,6 +895,8 @@ class SIFcam(_ImageData):
         else:
             pair_data['Rad760'] = rad_paths[0]
             pair_data['Rad757'] = rad_paths[1]
+            pair_data['Rad760_nm'] = rad_paths[0]
+            pair_data['Rad757_nm'] = rad_paths[1]
 
             pair_data['shape'] = SIFcam._load(rad_paths[0]).shape
 
@@ -840,8 +960,8 @@ class SIFcam(_ImageData):
             return Imreg, (yMin, yMax, xMin, xMax) 
 
     @staticmethod
-    def process_pairing(Im757, Im760, H, interpolation_method='linear', rescale_interpolation_method='linear', 
-                        gaussian_blur=None, transform_type=None):
+    def process_homography_pairing(Im757, Im760, H, interpolation_method='linear', rescale_interpolation_method='linear',
+                                   gaussian_blur=None, transform_type=None):
         """
             This function is to register data from two cameras
         Args:
@@ -1038,8 +1158,8 @@ class SIFcam(_ImageData):
         
         return arr
 
-    def _process_radiance(self, load=True, write=False, keep_data_in_memory=False,
-                          parallel_context=None):
+    def _process_radiance(self, load=True, write=False, write_nonmatched=True,
+                          keep_data_in_memory=False, parallel_context=None):
         """
         Parallel call of preprocess_radiance_and_pair_bands
         Args:
@@ -1057,7 +1177,8 @@ class SIFcam(_ImageData):
             path760, path757 = self.paths[i]
             io_kwargs = dict(path760=path760, path757=path757, load=load, write=write,
                              keep_data_in_memory=keep_data_in_memory,
-                             out_path=self.result_path, pairing_master_band=self.pairing_master_band)
+                             out_path=self.result_path, pairing_master_band=self.pairing_master_band, 
+                             write_nonmatched=write_nonmatched)
 
             # Prepare parallel execution`of
             # self._preprocess_radiance_and_pair(pair_data, self.sensor_params)
@@ -1068,8 +1189,8 @@ class SIFcam(_ImageData):
         save_data, remove = zip(*run_jobs(jobs, **self.parallel_params, parallel_context=parallel_context))
         return save_data, remove
 
-    def _process_reflectance_fluorescence(self, load=True, write=False, keep_data_in_memory=False,
-                                          parallel_context=None):
+    def _process_reflectance_fluorescence(self, load=True, write=False, write_nonmatched=True, 
+                                          keep_data_in_memory=False, parallel_context=None):
         """
         Parallel call of self.process_reflectance_fluorescence
         Args:
@@ -1085,7 +1206,8 @@ class SIFcam(_ImageData):
         for i, pair_data in enumerate(self._data):
             path760, path757 = self.paths[i]
             io_kwargs = dict(path760=path760, path757=path757, load=load, write=write,
-                             keep_data_in_memory=keep_data_in_memory, out_path=self.result_path)
+                             keep_data_in_memory=keep_data_in_memory, out_path=self.result_path, 
+                             write_nonmatched=write_nonmatched)
 
             # Prepare parallel execution of
             # self._process_reflectance_and_fluorescence(pair_data)

@@ -5,18 +5,20 @@
 #
 # SPDX-License-Identifier: GPL-3.0-or-later
 
-# Data params
+
+# Default values for incomplete configuration files. Refer to CONFIGURATION.md for a detailed explanation of each
+# parameter.
+
 data_params:
   dataset_path: ""
   result_path: ""
   camera_regex:
-    '760': '.*?(C760).*?\.tif$'
-    '757': '.*?(C757).*?\.tif$'
-  datatake_regex: '.*?'
+    '760': '.*?(C1).*'
+    '757': '.*?(C2).*'
+  datatake_regex: '.*?(\d+)\.tif$'
 
 
-# Sensor calibration configuration
-sensor_calibration_config: ''
+sensor_calibration_config: 'sensor_calib.yaml'
 
 
 preprocessing_params:
@@ -24,70 +26,78 @@ preprocessing_params:
   load_features: false
   write: true
   keep_data_in_memory: false
-
-  ransac_residual_threshold: 0.5
-  pairing_min_samples: 30
+  ransac_residual_threshold: 1
+  pairing_min_samples: 16
   pairing_transform_type: 'projective'
-  pairing_finetune_metric: null  # 'laplace'  # 'mi'
   pairing_master_band: 'Rad757'
-
-  radiance_gaussian_blur: null
-
-  interpolation_method: 'linear'
+  pairing_optical_flow_refinement: 'farneback'
+  interpolation_method: 'cubic'
   rescale_interpolation_method: null
+  sif_computation_method: 'fld'
+  radiance_gaussian_blur:
+    '760': null
+    '757': null
 
 
 registration_params:
   load: false
   write: true
-  min_n_correspondences: 10         # keep image pair if there are at least min_n_correspondences
-  min_movement: 6
-  ransac_residual_threshold: 1
+  n_features_trial: 128
+  min_n_correspondences: 8
+  min_movement: null
+  ransac_residual_threshold: 10
+  close_images_limit: 1
+  protect_correspondences_in_close_images: 0
+  spread_points: true
 
 
 alignment_params:
   load: false
   write: true
-  case: 4                           # 1: 2d w/o outlier removal (or), 2: 2d w. or, 3: 3d w/o or, 4: 3d w. or
-  n_outlier_removal: 1             # if manual_residual_removal is false, iterate n_outlier_removal times
+  n_outlier_removal: 5
   outlier_threshold: 5
-  manual_outlier_mode: false        # allow manual mode for residual based removal
-  n_points: 30                      # maximum number of correspondences per image pair to be used
+  manual_outlier_mode: false
+  n_points: 16
   resume_optimization: false
+  remove_disconnected_threshold: 4
   optim_params:
-    xtol: 0.0001
+    xtol: 0.0000001
     ftol: 0.000001
-    x_scale: 'jac'
+    gtol: 1000
+    max_nfev: 75
+    lsmr_maxiter: 300
+    lsmr_dynamic_maxiter_factor: null
+    lsmr_max_maxiter: null 
 
 
-# Feature creation params
 feature_params:
-  n_features_trial: 250             # number of features per image
-  n_SIFT_features_per_image: 20000  # sample n_SIFT_features_per_image SIFT features in each image
-  n_features_threshold: 100         # drop an image if less than n_features_threshold SIFT features are found
+  n_SIFT_features_per_image: 5096
+  n_features_threshold: 64
   feature_product: "Rad757"
   mask: null
 
 
-# Parallelization params
 parallel_params:
-  do_parallel: true                 # setting this to false deactivates the process based parallelization but not threading
-  n_processes: 64                    # -1 will use the all logical cores on your machine
-  n_threads: -1                     # -1 will use numba.config.NUMBA_NUM_THREADS threads
+  do_parallel: true
+  n_processes: 32
+  n_threads: 24
 
 
-# FLANN parameters
+vis_params:
+  run: true
+  interpolation_method: 'cubic'
+  n_processes: 10
+  products: [ 'sif', 'ref757', 'ref760' ]
+  aggregation_methods: [ 'closest_dist_weighted' ]
+  mosaic_origin:
+    X: 0
+    Y: 0
+  mosaic_resolution: 1
+
+
 flann_params:
   algorithm: 1
   trees: 5
   checks: 50
   type: "FlannBasedMatcher"
 
-
-# Visualization parameters
-vis_params:
-  mosaic_origin:
-    X: 0
-    Y: 0
-  mosaic_resolution: 1
-  interpolation_method: 'linear'

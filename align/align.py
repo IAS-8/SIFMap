@@ -8,13 +8,15 @@
 import numpy as np
 import skimage as ski
 import networkx as nx
+import copy
 from scipy.optimize import least_squares
 
-from align.calc import vector_to_affine_homography, calc_residual_offsets, get_mosaic_size
+from align.calc import vector_to_affine_homography, get_mosaic_size, \
+        convert_image_to_map_to_map_to_image_2d, convert_image_to_map_to_map_to_image_3d
 from align.jacobians import global_2d_jacobian
 from align.optimize import optimize_alignment_3d, point_match_residual_2d
-from data.geometry import get_pose_from_absolute, convert_bundle_to_gmml, convert_bundle_to_data, set_resolution
-from data.utils import timeit, print_text_histogram
+from data.utils import timeit, profile 
+from data.geometry import get_pose_from_absolute, convert_bundle_to_gmml, convert_bundle_to_data
 
 
 def get_user_input(message, expected_dtype):
@@ -59,38 +61,29 @@ def global_align_2d(IniH, data, n_points=50, min_n_correspondences=14, optim_par
     
     if init_x is None:
         xini = []
-        for mm in range(1, len(data)):
+        for mm in range(len(data)):
             t1 = np.linalg.inv(IniH[0][:]) @ IniH[mm][:]
-            tt1 = t1.flatten()
-            xini.append(tt1[0:6])
+            xini.append(t1.flatten())
+        x = np.asarray(xini).flatten()
 
-        xini = np.array(xini)
-        xini = xini.flatten()
-    
     else:
-        xini = init_x
+        x = init_x
 
-    _optim_params = dict(verbose=2,x_scale='jac', ftol=1e-6, xtol=1e-3)
-    if optim_params is not None:
-        _optim_params.update(optim_params)
+    optim_params, _optim_params = prepare_optim_params(optim_params)
+    print('Running least squares optimization with the followig parameters:', _optim_params)
     
-    orig = [1, 0, 0, 0, 1, 0]
-    out = least_squares(fun=point_match_residual_2d, x0=xini, jac=global_2d_jacobian, args=(data, orig), **_optim_params)
-
-    HRes = vector_to_affine_homography(out.x)
-    GlobalH = [np.identity(3) for _ in range(len(data))]
+    out = least_squares(fun=point_match_residual_2d, x0=x, jac=global_2d_jacobian, args=(data, ), **_optim_params)
 
     #convert image-to-map to map-to-image
-    for i in range(1, len(data)):
-        HH = np.linalg.inv(HRes[i - 1])
-        GlobalH[i] = HH / HH[2, 2]
-
+    x_reshaped = np.concatenate((orig, out.x))
+    GlobalH = convert_image_to_map_to_map_to_image_2d(data, x_reshaped)
     return GlobalH, out.x
 
 
 def global_align_2d_w_outlier_analysis(IniH, data, min_n_correspondences=14, n_points=50,
                                        n_outlier_removal=0, manual_outlier_mode=True, optim_params=None,
-                                       min_movement=None, outlier_threshold=5, init_x=None, **kwargs):
+                                       min_movement=None, outlier_threshold=5, init_x=None, remove_disconnected_threshold=None,
+                                       **kwargs):
     """
     This function does global alignment and check residuals afterwards
     in case of there exists residuals outside of 5*standard deviation,
@@ -113,40 +106,34 @@ def global_align_2d_w_outlier_analysis(IniH, data, min_n_correspondences=14, n_p
     # use n_points, min_n_correspondences
     remove = data.update_matches(min_n_correspondences=min_n_correspondences, n_points=n_points,
                                  min_movement=min_movement)
-
     IniH = np.delete(IniH, remove, axis=0)
+
     if init_x is not None:
         dels = [np.arange(6*i, 6*(i+1)) for i in remove]
         init_x = np.delete(init_x, dels)
 
     if init_x is None:
         xini = []
-        for mm in range(1, len(data)):
-            t1 = np.linalg.inv(IniH[0][:]) @ IniH[mm][:]
-            tt1 = t1.flatten()
-            xini.append(tt1[0:6])
+        for mm in range(len(data)):
+            t = np.linalg.inv(IniH[0][:]) @ IniH[mm][:]
+            xini.append(t.flatten()[:6])
 
-        xini = np.array(xini)
-        xini = xini.flatten()
+        x_reshaped = np.asarray(xini)
+        x = x_reshaped.flatten()
 
     else:
-        xini = init_x
+        x = init_x
+        x_reshaped = x.reshape(len(data), 6)
 
     stop = False
     i = 0
-    orig = [1, 0, 0, 0, 1, 0]
     while not stop:
 
-        _optim_params = dict(verbose=2, x_scale='jac', ftol=1e-6, xtol=1e-3)
-        if optim_params is not None:
-            _optim_params.update(optim_params)
+        optim_params, _optim_params = prepare_optim_params(optim_params)
+        print('Running least squares optimization with the followig parameters:', _optim_params)
 
-        result = least_squares(fun=point_match_residual_2d, x0=xini, jac=global_2d_jacobian, args=(data, orig),
-                               **_optim_params)
-
-
-        xini = result.x
-        x_reshaped = xini.reshape(len(data) - 1, -1)
+        result = least_squares(fun=point_match_residual_2d, x0=x, jac=global_2d_jacobian, args=(data, ),  # orig),
+                               **__optim_params)
 
         if manual_outlier_mode:
             manual_continue = get_user_input('Do you want to continue with outlier removal (0/1): ',
@@ -155,45 +142,41 @@ def global_align_2d_w_outlier_analysis(IniH, data, min_n_correspondences=14, n_p
         else:
             manual_continue = False
 
-        #if n_outlier_removal > 0 or manual_continue:
-        data, n_corr_removals = outlier_analysis(data, result.fun, outlier_threshold=outlier_threshold)
+        x = result.x
+        x_reshaped = x.reshape(len(data), 6)
+        
+        data, x_reshaped = handle_disconnected(data,
+                                           remove_disconnected_threshold,
+                                           min_n_correspondences,
+                                           n_points,
+                                           min_movement,
+                                           x=x_reshaped)
 
-        #if flag > 0:
-        remove = data.update_matches(min_n_correspondences=min_n_correspondences, n_points=n_points,
-                                     min_movement=min_movement)
+        data, x_reshaped, n_corr_removals = outlier_analysis(data,
+                                                         result.fun,
+                                                         outlier_threshold=outlier_threshold,
+                                                         min_n_correspondnces=min_n_correspondences,
+                                                         n_points=n_points,
+                                                         min_movement=min_movement,
+                                                         x=x_reshaped)
+        x = x_reshaped.flatten()
+        
         print(f'Outlier analysis removed {n_corr_removals} correspondences and {len(remove)} images')
-        print('Running with the following correspondence statistics:') # data.correspondence_statistics())
-        print_text_histogram(data.matches[:, 2])
-
-        remove_first = 0 in remove
-        remove = [r - 1 for r in remove if r > 0] 
-        if len(remove) > 0:
-            xini = np.delete(x_reshaped, remove, axis=0).flatten()
-
-        if remove_first:
-            print('Removing image 0')
-            #orig = xini[:x_reshaped.shape[0]]
-            xini = xini[x_reshaped.shape[1]:]
-
+        
         i += 1
         stop = (i == n_outlier_removal and not manual_outlier_mode) \
-                    or (not manual_continue and manual_outlier_mode)
+                or (not manual_continue and manual_outlier_mode)
 
-    HRes = vector_to_affine_homography(xini)
-    orig = vector_to_affine_homography(orig)
-    HGlobal = [orig[0] for _ in range(len(data))]
-    for i in range(1, len(data)):
-        HH = np.linalg.inv(HRes[i - 1])
-        HGlobal[i] = HH / HH[2, 2]
-
-    return np.asarray(HGlobal), xini
+    # convert image-to-map to map-to-image
+    GlobalH = convert_image_to_map_to_map_to_image_2d(data, x)
+    return GlobalH, x
 
 
 def global_align_3d_outlier_analysis(IniH, data, mosaic_origin, mosaic_resolution, KMat,
                                      n_outlier_removal=0, n_points=50, min_n_correspondences=14,
                                      manual_outlier_mode=True, parallel_params=None, optim_params=None,
                                      min_movement=None, outlier_threshold=5, init_x=None,
-                                     **kwargs):
+                                     remove_disconnected_threshold=3, **kwargs):
     """
     This function models image-to-map transformations as 3D camera pose
     Rotation is modeled via quaternions. Symmetric transfer error is minimized
@@ -233,24 +216,25 @@ def global_align_3d_outlier_analysis(IniH, data, mosaic_origin, mosaic_resolutio
     MosaicSize, mosaic_origin, glob_trfm, HGlobal = get_mosaic_size(H, data, mosaic_origin, mosaic_resolution)
     IniPose = get_pose_from_absolute(H, mosaic_origin, mosaic_resolution, KMat)
     RTs, K = convert_bundle_to_data(IniPose, data, KMat, mosaic_origin)
-    
+
+    optim_params, _optim_params = prepare_optim_params(optim_params)
+    print('Running least squares optimization with the followig parameters:', _optim_params)
+
     if init_x is None:
         _, _, _, wHi, x, residuals, parallel_context = optimize_alignment_3d(K, data,
-                                                                             RTs=RTs, optim_params=optim_params,
+                                                                             RTs=RTs, optim_params=_optim_params,
                                                                              parallel_params=parallel_params)
 
     else:
         _, _, _, wHi, x, residuals, parallel_context = optimize_alignment_3d(K, data, x=init_x,
-                                                                             optim_params=optim_params,
+                                                                             optim_params=_optim_params,
                                                                              parallel_params=parallel_params)
 
     q = 0
     while True:
-
         if manual_outlier_mode:
             manual_continue = get_user_input('Do you want to continue with outlier removal (0/1): ',
                                              expected_dtype=int)
-
         else:
             manual_continue = False
 
@@ -260,37 +244,37 @@ def global_align_3d_outlier_analysis(IniH, data, mosaic_origin, mosaic_resolutio
         if stop:
             break
 
-        data, n_corr_removals = outlier_analysis(data, residuals, outlier_threshold=outlier_threshold,
-                                                 pair_removal_thr=None)
-
         x_reshaped = x.reshape(len(data), 6)
-        if n_outlier_removal > 0:
-            remove = data.update_matches(min_n_correspondences=min_n_correspondences, n_points=n_points,
-                                         min_movement=min_movement)
-            x = np.delete(x_reshaped, remove, axis=0).flatten()
+        
+        data, x_reshaped = handle_disconnected(data, 
+                                               remove_disconnected_threshold, 
+                                               min_n_correspondences, 
+                                               n_points, 
+                                               min_movement, 
+                                               x=x_reshaped)
 
+        data, x_reshaped, n_corr_removals = outlier_analysis(data, 
+                                                             residuals, 
+                                                             x=x_reshaped, 
+                                                             outlier_threshold=outlier_threshold,
+                                                             pair_removal_thr=None, 
+                                                             min_n_correspondences=min_n_correspondences, 
+                                                             n_points=n_points, 
+                                                             min_movement=min_movement)
+
+        x = x_reshaped.flatten()
+         
         print(f'Outlier analysis removed {n_corr_removals} correspondences and {len(remove)} images')
-        print('Running with the following correspondence statistics:')   # data.correspondence_statistics())
-        print_text_histogram(data.matches[:, 2])
 
-        # Don't update motion parameters, just point and match data
-        #_, _, PointMatchesIdx, PointMatchesData = convert_bundle_to_data(IniPose, data,
-        #                                                                 KMat, mosaic_origin)
-        # optimize function should come here
+        optim_params, _optim_params = prepare_optim_params(optim_params)
+        print('Running least squares optimization with the followig parameters:', _optim_params)
+
         _, _, _, wHi, x, residuals, parallel_context = optimize_alignment_3d(K, data, x=x,
                                                                             parallel_context=parallel_context,
-                                                                            optim_params=optim_params,
+                                                                            optim_params=_optim_params,
                                                                             parallel_params=parallel_params)
 
         q += 1
-
-    H, FinalPose = convert_bundle_to_gmml(wHi, x, mosaic_origin, mosaic_resolution)
-    H = set_resolution(H, mosaic_resolution)
-
-    HGlobal = [np.identity(3) for _ in range(len(data))]
-    for i in range(len(data)):
-        HH = np.linalg.inv(H[i][:])
-        HGlobal[i][:] = HH / HH[2, 2]
 
     if parallel_context is not None:
         try:
@@ -299,7 +283,8 @@ def global_align_3d_outlier_analysis(IniH, data, mosaic_origin, mosaic_resolutio
         except:
             pass
 
-    return HGlobal, x
+    GlobalH = convert_image_to_map_to_map_to_image_3d(data, x, wHi, mosaic_resolution, mosaic_origin)
+    return GlobalH, x
 
 
 def global_align_3d(IniH, data, mosaic_origin, mosaic_resolution, KMat, n_points=50,
@@ -335,28 +320,62 @@ def global_align_3d(IniH, data, mosaic_origin, mosaic_resolution, KMat, n_points
     IniPose = get_pose_from_absolute(IniH, mosaic_origin, mosaic_resolution, KMat)
     RTs, K = convert_bundle_to_data(IniPose, data, KMat, mosaic_origin)
 
+    optim_params, _optim_params = prepare_optim_params(optim_params)
+    print('Running least squares optimization with the followig parameters:', _optim_params)
+
     if init_x is None:
         _, _, _, wHi, x, residuals, parallel_context = optimize_alignment_3d(K, data,
-                                                                             RTs=RTs, optim_params=optim_params,
+                                                                             RTs=RTs, optim_params=_optim_params,
                                                                              parallel_params=parallel_params)
 
     else:
         _, _, _, wHi, x, residuals, parallel_context = optimize_alignment_3d(K, data, x=init_x,
-                                                                             optim_params=optim_params,
+                                                                             optim_params=_optim_params,
                                                                              parallel_params=parallel_params)
 
-    HRes1, FinalPose = convert_bundle_to_gmml(wHi, x, mosaic_origin, mosaic_resolution)
-    HRes1 = set_resolution(HRes1, mosaic_resolution)
-
-    HGlobal = [np.identity(3) for _ in range(len(data))]
-    for i in range(len(data)):
-        HH = np.linalg.inv(HRes1[i][:])
-        HGlobal[i][:] = HH / HH[2, 2]
-
-    return HGlobal, x
+    GlobalH = convert_image_to_map_to_map_to_image_3d(data, x, wHi, mosaic_resolution, mosaic_origin)
+    return GlobalH, x
 
 
-def outlier_analysis(data, residuals, pair_removal_thr=None, outlier_threshold=5):
+def prepare_optim_params(optim_params):
+    optim_params = dict([k for k in optim_params.items() if k[1] is not None])
+
+    # translate optim_params to scipy.optimize
+    if not 'tr_options' in optim_params:
+        optim_params['tr_options'] = dict()
+
+    if 'lsmr_maxiter' in optim_params:
+        optim_params['tr_options']['maxiter'] = optim_params['lsmr_maxiter']
+        del optim_params['lsmr_maxiter']
+    
+    # default values
+    _optim_params = dict(verbose=2, x_scale='jac', ftol=1e-6, xtol=1e-3, method='trf', tr_solver='lsmr')
+    if optim_params is not None:
+        _optim_params.update(optim_params)
+    
+    if ('tr_options' in _optim_params and 'maxiter' in _optim_params['tr_options']
+            and 'lsmr_dynamic_maxiter_factor' in _optim_params):
+
+        if not 'lsmr_max_maxiter' in _optim_params:
+            _optim_params['lsmr_max_maxiter'] = np.inf
+
+        _optim_params['tr_options']['maxiter'] = min(int(_optim_params['tr_options']['maxiter'] \
+                                                         * _optim_params['lsmr_dynamic_maxiter_factor']),
+                                                     _optim_params['lsmr_max_maxiter'])
+
+    __optim_params = copy.deepcopy(_optim_params)
+
+    # translate optim_params to scipy.optimize
+    for var in ('lsmr_maxiter', 'lsmr_dynamic_maxiter_factor', 'lsmr_max_maxiter'):
+        if var in __optim_params:
+            del __optim_params[var]
+    
+    return _optim_params, __optim_params
+
+
+def outlier_analysis(data, residuals, x=None, outlier_threshold=5, 
+                     min_n_correspondences=None, n_points=None, min_movement=None, 
+                     x_adapter=None, **kwargs):
     """
         This function checks the residuals and tries to remove correspondences
         that are out of 5sigma regions
@@ -370,6 +389,7 @@ def outlier_analysis(data, residuals, pair_removal_thr=None, outlier_threshold=5
             image pairs and/or image removed as a result of outlier analysis
         flag : boolean if any removal procedure need to be carried out 
     """
+    adapt_x = x is not None
     matches = data.matches
     n_pairs = len(matches)
     pos = np.concatenate((np.array([0]), np.cumsum(matches[:, 2])))
@@ -399,28 +419,26 @@ def outlier_analysis(data, residuals, pair_removal_thr=None, outlier_threshold=5
         for ff in range(4):
             SubRes = rr[ff::4]
             Ix = np.where(np.abs(SubRes) > m[ff] + NumStDev[ff] * s[ff])[0]
-
-            if pair_removal_thr is not None and len(Ix) > pair_removal_thr:
-                pair_removal = True
-
-            #if Ix.size > 0:
-            #    Ixx = np.where((SubRes[Ix] < -7.5) | (SubRes[Ix] > 7.5))[0]
-            #    if Ixx.size > 0:
-            #        RemID = np.unique(np.concatenate((RemID, Ix[Ixx])))
-
             RemID = np.unique(np.concatenate((RemID, Ix)))
               
         data.remove_correspondence(Im1, Im2, correspondence_id=RemID)
-        if pair_removal:
-            print(f'Remove pair {(Im1, Im2)}')
-            data.remove_pairs(np.array([[Im1, Im2]]))
-
         n_removals += len(RemID)
- 
+        
+    if adapt_x:
+        remove = data.update_matches(min_n_correspondences=min_n_correspondences,
+                                     n_points=n_points,
+                                     min_movement=min_movement)
+        if x_adapter is None:
+            x = np.delete(x, remove, axis=0)
+        else:
+            x = x_adapter(x, remove)
+    
+        return data, x, n_removals
+
     return data, n_removals
 
 
-def get_init_H(data):
+def get_init_H(data, min_n_correspondences, n_points, min_movement, **kwargs):
     """
         This functions computes the initial image-to-map transformations based on 
         Minimum spanning tree algorithm and shortest path between images.
@@ -431,7 +449,9 @@ def get_init_H(data):
     Returns:
         IniH: Initial estimates for image-to-map transformations
     """
-    n_images = data.match_matrix.shape[0]
+    data.update_matches(min_n_correspondences, n_points, min_movement)
+
+    n_images = len(data)  #data.match_matrix.shape[0]
 
     matches = np.array(data.matches, dtype='float')
     matches[:, 2] = np.around(1.0 / matches[:, 2], 5)
@@ -466,11 +486,63 @@ def get_init_H(data):
 
         IniH[rt] = temp / temp[2, 2]
 
-    return IniH
+    return np.asarray(IniH)
 
 
-@timeit
-def align(data, case, init_H=None, init_x=None, **kwargs):
+def check_connected(data):
+    adj_matrix = np.zeros(data.match_matrix.shape)
+    for m in data.matches:
+        adj_matrix[m[0], m[1]] = m is not None and m[2] > 1
+        adj_matrix[m[1], m[0]] = m is not None and m[2] > 1
+
+    G = nx.from_numpy_array(adj_matrix)
+    return G, nx.is_connected(G)
+
+
+def handle_disconnected(data, remove_disconnected_threshold, min_n_correspondences,
+                        n_points, min_movement, x=None, x_adapter=None, **kwargs):
+
+    G, connected = check_connected(data)
+    components = [np.array(sorted(c), dtype=int) for c in nx.connected_components(G)]
+    len_per_component = np.asarray([len(c) for c in components])
+
+    if not connected:
+        print(f'WARINING: Found disconnected graph with these component sizes {len_per_component}.')
+        stop = False
+        n_deleted_images = 0
+
+        while not stop:
+            G, connected = check_connected(data)
+            components = [np.array(sorted(c), dtype=int) for c in nx.connected_components(G)]
+            len_per_component = np.asarray([len(c) for c in components])
+            order = np.argsort(len_per_component)
+
+            components = [components[o] for o in order]
+            len_per_component = len_per_component[order]
+            tbd = np.where(len_per_component <= remove_disconnected_threshold)[0]
+
+            if len(tbd) == 0:
+                break
+            
+            tbd = components[tbd[0]]
+            data.remove(tbd)
+            if x is not None and x_adapter is None:
+                x = np.delete(x, tbd, axis=0)
+
+            elif x is not None and x_apapter is not None:
+                x = x_adapter(x, tbd)
+
+            n_deleted_images += len(tbd)
+
+    if x is not None:
+        return data, x
+
+    return data
+
+
+#@timeit
+@profile()
+def align(data, init_H=None, init_x=None, **kwargs):
     """
         This function is to run the global alignment to obtain image-to-map transformations
     Args:
@@ -492,23 +564,16 @@ def align(data, case, init_H=None, init_x=None, **kwargs):
 
     # compute initial image-to-map transformations based on graph theory
     if init_H is None:
-        init_H = get_init_H(data)
-
-    # global alignment either in 2D or 3D (accurate camera instrinsics needed)
+        init_H = get_init_H(data, **kwargs)
     
-    if case == 1:
-        HGlobal, x = global_align_2d(init_H, data, init_x=init_x, **kwargs)
+    # global alignment either in 2D or 3D (accurate camera instrinsics needed)
+    handle_disconnected(data, **kwargs) 
 
-    elif case == 2:
-        HGlobal, x = global_align_2d_w_outlier_analysis(init_H, data, init_x=init_x, **kwargs)
-
-    elif case == 3:
+    if not kwargs['n_outlier_removal'] > 0:
         HGlobal, x = global_align_3d(init_H, data, init_x=init_x, **kwargs)
 
-    elif case == 4:
+    else:
         HGlobal, x = global_align_3d_outlier_analysis(init_H, data, init_x=init_x, **kwargs)
 
-    else:
-        raise ValueError('case must be in [1, 2, 3, 4]')
-
     return data, np.asarray(HGlobal), x
+

@@ -17,6 +17,7 @@ COPY ./requirements.txt .
 
 RUN apt-get update
 RUN apt-get install libexpat1
+RUN apt-get install -y libgomp1 gcc
 
 # Install system dependencies required for GDAL
 RUN pip install --no-cache-dir -r requirements.txt

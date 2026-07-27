@@ -1,0 +1,56 @@
+# SPDX-FileCopyrightText: © 2025 Forschungszentrum Jülich GmbH
+# SPDX-FileContributor: Armagan Elibol
+# SPDX-FileContributor: Christian Hirt
+# SPDX-FileContributor: Jim Buffat <j.buffat@fz-juelich.de>
+#
+# SPDX-License-Identifier: GPL-3.0-or-later
+
+# flat field
+flat_field:
+  "757": "/app/example_data/01_mixed_crops_13062021/FFmap757.mat"
+  "760": "/app/example_data/01_mixed_crops_13062021/FFmap760.mat"
+
+radiance_calibration:
+  "760": 0.12062198
+  "757": 0.12062198 
+
+dark_acquisitions: "/app/example_data/01_mixed_crops_13062021/dark"
+
+KMat:
+  - [961, 0, 256]          # focal_length / (px_size * binning_factor) = 25 mm / (6.5 um * 2) = 
+  - [0, 961, 256]    
+  - [0, 0, 1] 
+
+
+# Reflectance Calibration
+# First column: reference reflectance value, second column: measured radiance after gain
+reflectance_calibration:
+  "757":
+    - [0.6324, 180.57919014]
+    - [0.3868, 119.491831]
+    - [0.23, 74.86207259]
+    - [0.1133, 60.58030743]
+    - [0.0551, 42.95281574]
+    - [0.0495, 37.74728319]
+    - [0.0401, 32.86473301]
+    - [0.0294, 28.26332395]
+    - [0.0202, 21.54948556]
+
+  "760":
+    - [0.6324, 44.55496508]
+    - [0.3868, 30.80202115]
+    - [0.23, 20.4571756]
+    - [0.1133, 17.53258367]
+    - [0.0551, 13.53209504]
+    - [0.0495, 12.26597721]
+    - [0.0401, 11.27942977]
+    - [0.0294, 10.17280967]
+    - [0.0202, 8.66094953]
+
+mask: null
+
+# Integration Times
+integration_times:
+  "760": 70
+  "757": 14
+

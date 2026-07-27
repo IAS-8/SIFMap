@@ -9,6 +9,16 @@ import numpy as np
 
 from data.data import Datastruct
 from data.geometry import quat2rotmat
+from data.geometry import get_pose_from_absolute, convert_bundle_to_gmml, convert_bundle_to_data, set_resolution
+
+import numba
+from numba import jit
+
+import scipy
+from scipy.spatial import ConvexHull
+
+import shapely
+from shapely.geometry import MultiPoint
 
 
 def vector_to_affine_homography(x):
@@ -22,45 +32,159 @@ def vector_to_affine_homography(x):
     Returns:
         Hini: 2D image-to-map transformations
     """
-    NbrUnk = 6
-    n_images = len(x) // NbrUnk
+    n_params = 6
+    n_images = len(x) // n_params
 
-    Hini = [np.eye(3) for _ in range(n_images)]
-
+    Hini = []
     for i in range(n_images):
-        Hini[i] = np.array([[x[(i)*NbrUnk], x[(i)*NbrUnk+1], x[(i)*NbrUnk+2]],
-                            [x[(i)*NbrUnk+3], x[(i)*NbrUnk+4], x[(i)*NbrUnk+5]],
-                            [0, 0, 1]])
+        Hini.append(np.array([[x[i*n_params+0], x[i*n_params+1], x[i*n_params+2]],
+                              [x[i*n_params+3], x[i*n_params+4], x[i*n_params+5]],
+                              [0, 0, 1]]))
 
-    return Hini
+    return np.asarray(Hini)
 
-def calc_residual_offsets(PointMatchesSize, PointMatchesIdxSize):
+
+def convert_image_to_map_to_map_to_image_2d(data, x):
+    H = vector_to_affine_homography(x)
+    GlobalH = []   #[np.identity(3) for _ in range(len(data))]
+    for i in range(len(data)):
+        HH = np.linalg.inv(H[i][:])
+        GlobalH.append(HH / HH[2, 2])
+
+    return np.asarray(GlobalH)
+
+
+def convert_image_to_map_to_map_to_image_3d(data, x, wHi, mosaic_resolution, mosaic_origin, rotate_to_minimum_area=True):
+    H, FinalPose = convert_bundle_to_gmml(wHi, x, mosaic_origin, mosaic_resolution)
+    H = set_resolution(H, mosaic_resolution)
+    
+    if rotate_to_minimum_area:
+        H = optimize_global_rotation(H, data)
+
+    GlobalH = [np.identity(3) for _ in range(len(data))]
+    for i in range(len(data)):
+        HH = np.linalg.inv(H[i][:])
+        GlobalH[i][:] = HH / HH[2, 2]
+
+    return np.asarray(GlobalH)
+
+
+def optimize_global_rotation(GlobalH, data):
     """
+    Rotate image->map homographies so the mosaic has the minimum-area
+    enclosing rectangle.
 
+    Parameters
+    ----------
+    GlobalH : (N,3,3) ndarray
+        Image -> map homographies.
+    data :
+
+    Returns
+    -------
+    HGlobal_new : (N,3,3) ndarray
+        Rotated/transformed image -> map homographies.
+    theta : float
+        Rotation angle in radians.
+    canvas_size : (width, height)
+    """
+    # Map-space corners
+    pts = []
+    for i, H in enumerate(GlobalH):
+        h, w = data.shapes[i]
+
+        corners = np.array([
+            [0, 0, 1],
+            [w, 0, 1],
+            [w, h, 1],
+            [0, h, 1]
+        ]).T
+
+        p = H @ corners
+        p /= p[2]
+        pts.append(p[:2].T)
+
+    pts = np.vstack(pts)
+
+    # Convex hull
+    hull = ConvexHull(pts)
+    hull_pts = pts[hull.vertices]
+
+    # Minimum rotated rectangle
+    rect = MultiPoint(hull_pts).minimum_rotated_rectangle
+    rect = np.asarray(rect.exterior.coords[:-1])
+
+    edge = rect[1] - rect[0]
+    theta = np.arctan2(edge[1], edge[0])
+
+    # Rotate the rectangle back to horizontal
+    c = np.cos(-theta)
+    s = np.sin(-theta)
+
+    R = np.array([
+        [c, -s, 0],
+        [s,  c, 0],
+        [0,  0, 1]
+    ])
+
+    # Rotate all points to determine bounding box
+    pts_h = np.c_[pts, np.ones(len(pts))].T
+    pts_rot = (R @ pts_h)[:2].T
+
+    xmin, ymin = pts_rot.min(axis=0)
+
+    # Translate so top-left is (0,0)
+    T = np.array([
+        [1, 0, -xmin],
+        [0, 1, -ymin],
+        [0, 0, 1]
+    ])
+
+    A = T @ R
+
+    # Update homographies (image -> new map)
+    HGlobal_new = A @ GlobalH
+    return HGlobal_new
+
+
+def get_non_connected_close(data, t=1):
+    """
+    Get the image ids of images that connect to an image without neighbours, where neighbour defines an image with an
+    index that has a distance of at most t.
     Args:
-        PointMatchesSize ():
-        PointMatchesIdxSize ():
+        data:
+        t:
 
     Returns:
-
+        [(id, n_correspondences)....]: list of tuples
     """
-    if (PointMatchesSize is not None and len(PointMatchesSize) != 2) or \
-       (PointMatchesIdxSize is not None and len(PointMatchesIdxSize) != 2):
-        raise ValueError('Length of input vectors must be 2!')
+    idnum_mapping = dict([(data.data.data[k]['idnum'], k) for k in range(len(data.match_matrix))])
 
-    NumPointMatches = PointMatchesSize[0] * PointMatchesSize[1]
+    non_connected_close = []
+    for idnum in idnum_mapping.keys():
+        range_ = np.arange(idnum - t, idnum + t + 1)
+        close_connects = []
+        for other_idnum in range_:
+            if other_idnum == idnum or other_idnum not in idnum_mapping:
+                continue
 
-    if len(locals()) > 1:
-        PointMatchesOffs = 0
-        return NumPointMatches, PointMatchesOffs
-    else:
-        return NumPointMatches
+            ms = data.match_matrix[idnum_mapping[idnum], idnum_mapping[other_idnum]]
+            close_connects.append((other_idnum, 0 if ms is None else len(ms)))
+
+        if len(close_connects) == 0:
+            non_connected_close.append((idnum, None))
+
+        elif np.logical_not(np.array(close_connects)[:, 1]).any():
+            non_connected_close.append((idnum, close_connects))
+
+    return non_connected_close
+
 
 def get_mosaic_size(IniH, data, MosaicOrigin, MosaicResolution):
     """
 
     Args:
-        IniH (): Initial estimate of image-to-map 2D planar transformations
+        IniH (): image-to-map 2D planar transformations
         ImageSize (): Image resolution, e.g., 
             ImageSize = {'Width':1024,'Height':1024,'Depth':3,'Bits':8}
         MosaicOrigin (): amount of translation in order to have all images 
@@ -132,9 +256,10 @@ def get_mosaic_size(IniH, data, MosaicOrigin, MosaicResolution):
     return MosaicSize, MosaicOrigin, H, IniH
 
 
+@jit(nopython=True, cache=True, parallel=False)
 def calculate_homography_3d(x, K):
     """
-    From 3d pose to 2d homography
+    From 3d pose to 2d homography.
 
     Args:
         x (): motion parameter of all images in a single vector format
@@ -175,10 +300,6 @@ def calculate_homography_3d(x, K):
         else:
             wi = np.sqrt(wi)
 
-        # wi = np.sqrt(1.0 - vxi * vxi - vyi * vyi - vzi * vzi)
-
-        # q1 = RotLib.from_quat([vxi, vyi, vzi, wi ])
-        # cRw =q1.as_matrix()#
         cRw = quat2rotmat([wi, vxi, vyi, vzi])
 
         X = x[k + 3]

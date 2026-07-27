@@ -12,13 +12,34 @@ import os
 
 
 class Datastruct(object):
-    def __init__(self, image_data, from_file=None):
+    """
+    This abstract class defines a data structure that holds image references (via a object of type _ImageData),
+     a matching matrix and image correspondences. It serves as an interface with the registration and alignment
+     implementations defined under `match` and `align`, ensuring safe removal of images and correspondences.
+
+    """
+    def __init__(self, image_data, protect_correspondences_in_close_images=0, close_images_limit=1, 
+                 from_file=None, spread_points=True, **kwargs):
+        """
+
+        Args:
+            image_data: _ImageData object
+            protect_correspondences_in_close_images: whether to protect close images (i.e. images with a difference in
+                                                     numerical index smaller than close_images_limit. For this to be
+                                                     taken account of the image_data object must hold a field `idnum`.
+            close_images_limit: threshold to consider two images close
+            from_file: whether to load a preexisting state from disk
+            spread_points: whether to filter correspondences in a way to maximize distribution across individual images.
+        """
         self.data = image_data
         self.matches = None
         n_images = len(self.data)
 
         self._mapping = np.arange(n_images).astype(int)
-        
+        self.protect_correspondences_in_close_images = protect_correspondences_in_close_images
+        self.close_images_limit = close_images_limit
+        self.spread_points = spread_points
+
         if from_file is None:
             self.match_matrix = np.empty((n_images, n_images), dtype=object)
             self._mapping = np.arange(n_images).astype(int)
@@ -77,7 +98,7 @@ class Datastruct(object):
                     n_pairs=self.matches[:, 2].shape[0],
                     )
 
-    def remove_isolated_images(self, min_n_matches=2):
+    def remove_isolated_images(self, min_n_matches=1):
         """
             This function checks the overlapping image pairs for each image
             and remove the ones that have less than min_n_matches image pairs.
@@ -90,14 +111,15 @@ class Datastruct(object):
         """
         matches = self.matches
         n_images = len(self._mapping)
+        
+        matches = np.concatenate((matches[:, 0], matches[:, 1]))
+        remove = []
+        for r in np.arange(n_images):
+            mat = np.sum(matches == r)
+            if mat < min_n_matches:
+                remove.append(r)
 
-        try:
-            abc = np.concatenate((matches[:, 0], matches[:, 1]))
-            a1, _ = np.histogram(abc, bins=np.arange(-0.5, n_images + .5, 1))
-            remove = np.where(a1 < min_n_matches)[0]
-        except Exception as e:
-            print(e)
-            raise Exception()
+        remove = np.array(remove).astype(int)
 
         self.remove(remove)
         return remove
@@ -122,23 +144,12 @@ class Datastruct(object):
             
             distances = np.array([np.sqrt(((p1 - p2) ** 2).sum()) for p1, p2, in zip(Im1PList, Im2PList)])
             if np.quantile(distances, 0.75) < min_movement:
-                if False:
-                    all_ids = list(range(len(Im2PList)))
-                    n_keeps = min(n_points, len(all_ids))
-
-                    if n_keeps < len(all_ids):
-                        keep_ids = np.random.choice(all_ids, n_keeps, replace=False)
-                        del_ids = set(all_ids) - set(keep_ids)
-
-                        remove.append((Im1, Im2, np.asarray(list(del_ids))))
-
-                else:
-                    n_keeps = min(n_points, len(Im1PList))
-                    keep_ids = spread_points(np.concatenate((Im1PList.T, Im2PList.T)), n_keeps)
-                    all_ids = list(range(len(Im2PList)))
-                    del_ids = set(all_ids) - set(keep_ids)
-                    if len(del_ids) > 0:
-                        remove.append((Im1, Im2, np.asarray(list(del_ids))))
+                n_keeps = min(n_points, len(Im1PList))
+                keep_ids = spread_points(np.concatenate((Im1PList.T, Im2PList.T)), n_keeps)
+                all_ids = list(range(len(Im2PList)))
+                del_ids = set(all_ids) - set(keep_ids)
+                if len(del_ids) > 0:
+                    remove.append((Im1, Im2, np.asarray(list(del_ids))))
         
         if len(remove) > 0:
             n_removals = np.sum([len(del_ids) for (im1, im2, del_ids) in remove])
@@ -152,6 +163,30 @@ class Datastruct(object):
             self.match_matrix[pairs[tt, 0], pairs[tt, 1]] = None
             self.match_matrix[pairs[tt, 1], pairs[tt, 0]] = None
 
+    def is_close_images_and_protected(self, Im1, Im2, to_be_removed=0):
+        if not ('idnum' in self.data.data[self._mapping[Im1]] and 'idnum' in self.data.data[self._mapping[Im2]]):
+            return False
+
+        if self.protect_correspondences_in_close_images > 0 \
+                and np.abs(self.data.data[self._mapping[Im1]]['idnum'] - self.data.data[self._mapping[Im2]]['idnum']) <= self.close_images_limit \
+                and len(self.match_matrix[Im1, Im2]) - to_be_removed <= self.protect_correspondences_in_close_images:
+            return True
+
+        else:
+            return False
+
+    def is_close_images(self, Im1, Im2):
+        if not ('idnum' in self.data.data[self._mapping[Im1]] and 'idnum' in self.data.data[self._mapping[Im2]]):
+            return False
+
+        if self.protect_correspondences_in_close_images > 0 \
+                and np.abs(self.data.data[self._mapping[Im1]]['idnum'] - self.data.data[self._mapping[Im2]]['idnum']) <= self.close_images_limit:
+            return True
+
+        else:
+            return False
+
+
     def remove_correspondence(self, Im1, Im2, correspondence_coord=None, correspondence_id=None):
         """
         This function is to remove a single correspondences between an image pair.
@@ -162,18 +197,24 @@ class Datastruct(object):
 
         Returns:
         """
-        M = np.array(self.match_matrix[Im1, Im2])
-        P = np.array(self.match_matrix[Im2, Im1])
-
+       
         # Remove correspondences 'pm' from the correspondences list between 'Im1' and 'Im2'
         if correspondence_coord is not None:
-
             delID1 = np.where(np.abs(P[:, 0] - correspondence_coord[0] + P[:, 1] - correspondence_coord[1]) < 1e-2)[0]
             delID2 = np.where(np.abs(M[:, 0] - correspondence_coord[2] + M[:, 1] - correspondence_coord[3]) < 1e-2)[0]
             delID = np.intersect1d(delID1, delID2)
 
         else:
             delID = correspondence_id
+        
+        # check if images are close
+        # if close only remove if there are more than n_close_correspondences
+        if self.is_close_images_and_protected(Im1, Im2, to_be_removed=len(delID)):
+            return
+
+        M = np.array(self.match_matrix[Im1, Im2])
+        P = np.array(self.match_matrix[Im2, Im1])
+
 
         P = np.delete(P, delID, axis=0)
         M = np.delete(M, delID, axis=0)
@@ -192,7 +233,12 @@ class Datastruct(object):
         Returns:
             new_matching: a new Data structure with images removed.
         """
+        if 'idnum' in self.data.data[0]:
+            print('Removing images (image IDs): ', [self.data.data[self._mapping[r]]['idnum'] for r in remove])
 
+        else:
+            print('Removing images: ', remove)
+        
         self.match_matrix = np.delete(self.match_matrix, remove, axis=0)
         self.match_matrix = np.delete(self.match_matrix, remove, axis=1)
 
@@ -236,8 +282,15 @@ class Datastruct(object):
         out = list()
         for i in range(n_images - 1):
             for j in range(i + 1, n_images):
-                if (self.match_matrix[i, j] is not None and
-                        len(self.match_matrix[i, j]) >= min_n_correspondences):
+                if self.match_matrix[i, j] is None:
+                    continue
+                
+                if not self.is_close_images(i, j):
+                    enough_correspondences = len(self.match_matrix[i, j]) >= min_n_correspondences 
+                else:
+                    enough_correspondences = len(self.match_matrix[i, j]) > 0
+
+                if enough_correspondences:
                     _match = [j, i, len(self.match_matrix[i, j])]
                     out.append(_match)
 
@@ -275,11 +328,16 @@ class Datastruct(object):
                 Im1PList = self.match_matrix[Im2][Im1].T
 
                 if n_matching_points > n_points:
-                    idd = spread_points(np.concatenate((Im1PList, Im2PList)), n_points)
-                    self.match_matrix[Im1][Im2] = Im2PList[:, idd].T
-                    self.match_matrix[Im2][Im1] = Im1PList[:, idd].T
+                    if self.spread_points:
+                        idd = spread_points(np.concatenate((Im1PList, Im2PList)), n_points)
+                        self.match_matrix[Im1][Im2] = Im2PList[:, idd].T
+                        self.match_matrix[Im2][Im1] = Im1PList[:, idd].T
 
-                    self.matches[i, 2] = len(idd)
+                    else:
+                        self.match_matrix[Im1][Im2] = Im2PList[:, :n_points].T
+                        self.match_matrix[Im2][Im1] = Im1PList[:, :n_points].T
+
+                    self.matches[i, 2] = n_points
 
         return self.matches
 
@@ -313,6 +371,10 @@ class Datastruct(object):
 
 
 class _ImageData(object):
+    """
+    This is an abstract class interfacing a set of images with the Datastruct class.
+
+    """
     BASE_KEYS = ['points', 'features', 'valid_points', 'file_name']
 
     def setup(self, paths, ids):
@@ -327,6 +389,11 @@ class _ImageData(object):
         for i in range(len(paths)):
             data[i] = dict([(b, None) for b in self.BASE_KEYS])
             data[i].update(dict(id=ids[i]))
+
+            try:
+                data[i].update(idnum=int(ids[i]))
+            except ValueError as e:
+                pass
 
         return data
 

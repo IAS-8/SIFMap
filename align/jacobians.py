@@ -15,10 +15,11 @@ import numba
 from numba import jit
 
 
-def global_3d_jacobian(x, data, K, parallel_context=None):
+def global_3d_jacobian(x, K, match_matrix, matches, index=None):
     """
         This function computes the jacobian matrix for the symmetric transfer 
-        error with motion modeled in 3D 
+        error with motion modeled in 3D.
+
     Args:
         x ():image-to-map motion parameters in a vector
         PointMatchesData (): correspondences between images
@@ -29,98 +30,23 @@ def global_3d_jacobian(x, data, K, parallel_context=None):
     Returns:
         J : jacobian matrix 
     """
-    matches = data.matches
-
-    n_pairs = len(matches)
     n_correspondences = matches[:, 2].sum()
-    
-    tot_n_params = len(x)
     n_params = 6
     n_cost_terms_per_corr = 4   # |y'- Hy| and |y - Hinv y'| in both 2d directions
-
     n_residuals = n_cost_terms_per_corr * n_correspondences
-    n_derivs_per_cost_term = n_params * 2
 
-    jac_size = n_correspondences * n_cost_terms_per_corr  * n_derivs_per_cost_term
-
-    # Prepare indices and value matrices for jacobian matrix
-    triplet = {"Row": np.zeros(jac_size), "Col": np.zeros(jac_size), "Val": np.ones(jac_size)}
-
-    row = np.flip(np.arange(1, n_params + 1))
-
-    # Prepare indices
-    k = 0
-    t = 0
-    for n in range(n_pairs):
-        Ii = (data.matches[n, 0] + 1) * n_params
-        Ij = (data.matches[n, 1] + 1) * n_params
-        rows = np.vstack((Ii - row, Ij - row))
-        a = np.array(rows.flatten(), dtype=int)
-
-        n_points = data.matches[n, 2]
-        for m in range(n_points * 4):
-            triplet["Col"][t:t + n_derivs_per_cost_term] = a
-            triplet["Row"][t:t + n_derivs_per_cost_term] = k
-            k += 1
-            t += n_derivs_per_cost_term
-
-    match_matrix = convert_to_numba_list_of_lists(data.match_matrix)
-    triplet_val = _global_3d_jacobian(K, n_params, match_matrix, matches, x)
-    
-    triplet["Val"] = triplet_val
+    triplet = _global_3d_jacobian(K, match_matrix, matches, x, index=index)
     J = csc_matrix((triplet["Val"], (triplet["Col"], triplet["Row"])),
-                   shape=(tot_n_params, n_residuals))
+                   shape=(len(x), n_residuals))
     J = J.transpose()
 
     return J
 
 
-@jit(nopython=True, cache=True, parallel=False)
-def _global_3d_jacobian(K, n_params, match_matrix, matches, x):
-    n_pairs = len(matches)
-    n_correspondences = matches[:, 2].sum()
-    pos = np.concatenate((np.array([0]), np.cumsum(matches[:, 2])))
-
-    row = np.flip(np.arange(1, n_params + 1))
-
-    triplet_val = np.zeros(n_correspondences * 48, dtype=np.float64)
-    for n in numba.prange(n_pairs):
-
-        i = matches[n, 0]
-        j = matches[n, 1]
-
-        Ii = (i + 1) * n_params
-        Ij = (j + 1) * n_params
-        rows = np.vstack((Ii - row, Ij - row)).flatten()
-
-        # Obtain Ks
-        Ki = K[:, :, i]
-        # Kj = K[:, :, j]
-
-        Vars = np.concatenate(
-            (np.array([Ki[0, 0], Ki[1, 1], Ki[0, 2], Ki[1, 2], Ki[0, 0], Ki[1, 1], Ki[0, 2], Ki[1, 2]]), x[rows]))
-        
-        coords = np.concatenate((match_matrix[j][i], match_matrix[i][j]), axis=1)
-
-        n_points = matches[n, 2]
-        for m in np.arange(n_points):
-            J1, J2, J3, J4 = _single_pair_jacobian_point_matches_3d(np.concatenate((Vars, coords[m])))
-            Js = J1, J2, J3, J4
-            _append = np.concatenate(Js).flatten()
-            #_append = np.array([J[k] for k in range(len(Js[0])) for J in Js ])
-
-            start = pos[n] * len(_append) + m * len(_append)
-            stop = start + len(_append)
-
-            triplet_val[start:stop] = _append
-
-    return triplet_val
-
-
-def global_2d_jacobian(x, data, xext):
+def global_2d_jacobian(x, data):
     """
         This function computes the jacobian matrix for the symmetric transfer
-        error with affine 2d planar motion models
+        error with affine 2d planar motion models.
     Args:
         x (): image-to-map motion parameters in a vector
         DATAstruct : Data structure to keep the successfully matched
@@ -137,11 +63,7 @@ def global_2d_jacobian(x, data, xext):
     n_correspondences = int(np.sum(matches[:, 2]))  # total number of correspondences
     n_params = 6
 
-    if xext is None:
-        xext = [1, 0, 0, 0, 1, 0]
-
-    xext = np.concatenate((xext, x))  # include first homography as an identity mapping, first image frame is mosaic frame
-    H = vector_to_affine_homography(xext)
+    H = vector_to_affine_homography(x)
 
     # Initialize row, column and value arrays for Jacobian Matrix
     match_matrix = convert_to_numba_list_of_lists(data.match_matrix)
@@ -153,14 +75,98 @@ def global_2d_jacobian(x, data, xext):
 
     # Create the sparse Jacobain matrix
     J = csr_matrix((X, (I.flatten(), J.flatten())), shape=(rows, cols))
-
-    # First is considered fixed as global (map) frame
-    # Trim the matrix J1 to exclude the first 6 columns
-    J = J[:, 6:]
     return J
 
 
 @jit(nopython=True, cache=True, parallel=True)
+def _get_index_for_3d_jacobian(matches):
+    n_pairs = len(matches)
+    n_correspondences = matches[:, 2].sum()
+    
+    n_params = 6
+    n_cost_terms_per_corr = 4   # |y'- Hy| and |y - Hinv y'| in both 2d directions
+
+    n_residuals = n_cost_terms_per_corr * n_correspondences
+    n_derivs_per_cost_term = n_params * 2
+
+    jac_size = n_correspondences * n_cost_terms_per_corr  * n_derivs_per_cost_term
+
+    # Prepare indices for jacobian matrix
+    triplet = {"Row": np.zeros(jac_size), "Col": np.zeros(jac_size)}
+    row = np.flip(np.arange(1, n_params + 1))
+    k = 0
+    t = 0
+    pos = np.concatenate((np.array([0]), np.cumsum(matches[:, 2])))
+    for n in numba.prange(n_pairs):
+        Ii = (matches[n, 0] + 1) * n_params
+        Ij = (matches[n, 1] + 1) * n_params
+        rows = np.vstack((Ii - row, Ij - row))
+        #a = np.array(rows.flatten())
+
+        n_points = matches[n, 2]
+        for m in range(n_points * 4):
+            k = m + pos[n] * 4
+            t = (m + pos[n] * 4) * n_derivs_per_cost_term
+            triplet["Col"][t:t + n_derivs_per_cost_term] = rows.flatten()
+            triplet["Row"][t:t + n_derivs_per_cost_term] = k
+    
+    return triplet
+
+
+@jit(nopython=True, cache=True, parallel=True)
+def _global_3d_jacobian(K, match_matrix, matches, x, index=None):
+    n_pairs = len(matches)
+    n_correspondences = matches[:, 2].sum()
+    
+    n_params = 6
+    n_cost_terms_per_corr = 4   # |y'- Hy| and |y - Hinv y'| in both 2d directions
+
+    n_residuals = n_cost_terms_per_corr * n_correspondences
+    n_derivs_per_cost_term = n_params * 2
+
+    jac_size = n_correspondences * n_cost_terms_per_corr  * n_derivs_per_cost_term
+
+    if index is None:
+        triplet = _get_index_for_3d_jacobian(matches)
+
+    else:
+        triplet = index
+           
+    # Calculate gradients
+    pos = np.concatenate((np.array([0]), np.cumsum(matches[:, 2])))
+    row = np.flip(np.arange(1, n_params + 1))
+    triplet_val = np.zeros(jac_size)
+    for n in numba.prange(n_pairs):
+        i = matches[n, 0]
+        j = matches[n, 1]
+
+        Ii = (i + 1) * n_params
+        Ij = (j + 1) * n_params
+        rows = np.vstack((Ii - row, Ij - row)).flatten()
+
+        # Obtain Ks
+        Ki = K[:, :, i]
+        Vars = np.concatenate(
+            (np.array([Ki[0, 0], Ki[1, 1], Ki[0, 2], Ki[1, 2], Ki[0, 0], Ki[1, 1], Ki[0, 2], Ki[1, 2]]), x[rows]))
+
+        coords = np.concatenate((match_matrix[j][i], match_matrix[i][j]), axis=1)
+
+        n_points = matches[n, 2]
+        for m in np.arange(n_points):
+            J1, J2, J3, J4 = _single_pair_jacobian_point_matches_3d(np.concatenate((Vars, coords[m])))
+            Js = J1, J2, J3, J4
+
+            _append = np.concatenate(Js).flatten()
+            start = pos[n] * len(_append) + m * len(_append)
+            stop = start + len(_append)
+
+            triplet_val[start:stop] = _append
+    
+    triplet["Val"] = triplet_val
+    return triplet
+
+
+@jit(nopython=True, cache=True, parallel=False)
 def _global_2d_jacobian(H, n_params, match_matrix, matches):
     n_pairs = len(match_matrix)
     n_correspondences = matches[:, 2].sum()

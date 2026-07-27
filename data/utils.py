@@ -25,6 +25,91 @@ from scipy.optimize import curve_fit
 from sklearn.base import BaseEstimator, TransformerMixin
 
 
+import functools
+import os
+import threading
+import time
+
+import psutil
+
+
+_PROCESS = psutil.Process(os.getpid())
+
+
+def _total_rss():
+    """Return RSS (bytes) of this process and all living descendants."""
+    total = 0
+
+    try:
+        total += _PROCESS.memory_info().rss
+    except psutil.NoSuchProcess:
+        return 0
+
+    for child in _PROCESS.children(recursive=True):
+        try:
+            total += child.memory_info().rss
+        except (psutil.NoSuchProcess, psutil.AccessDenied):
+            pass
+
+    return total
+
+
+def profile(interval=0.01):
+    """
+    Decorator reporting execution time and peak RSS of the entire process tree.
+
+    Parameters
+    ----------
+    interval : float
+        Sampling interval in seconds.
+    """
+
+    def decorator(func):
+
+        @functools.wraps(func)
+        def wrapper(*args, **kwargs):
+
+            baseline = _total_rss()
+            peak = baseline
+
+            stop = threading.Event()
+
+            def monitor():
+                nonlocal peak
+                while not stop.is_set():
+                    peak = max(peak, _total_rss())
+                    stop.wait(interval)
+
+            monitor_thread = threading.Thread(
+                target=monitor,
+                daemon=True,
+            )
+
+            start = time.perf_counter()
+            monitor_thread.start()
+
+            try:
+                return func(*args, **kwargs)
+
+            finally:
+                stop.set()
+                monitor_thread.join()
+
+                elapsed = time.perf_counter() - start
+
+                print('\n*** PROFILING RESULTS FOR '
+                    f"{func.__qualname__}: "
+                    f"{elapsed:.2f} s | "
+                    f"Start: {baseline/1024**2:.1f} MB | "
+                    f"Peak: {peak/1024**2:.1f} MB | "
+                    f"Peak increase: {(peak-baseline)/1024**2:.1f} MB ***\n"
+                )
+
+        return wrapper
+
+    return decorator
+
+
 def timeit(func):
     """
     Decorator for measuring function's running time.
@@ -41,6 +126,9 @@ def timeit(func):
 
 def run_jobs(jobs, do_parallel=True, n_jobs=4, n_chunks=1, chunk_callback=None, parallel_context=None,
              *args, **kwargs):
+    """
+    Manage a parallelzed job execution.
+    """
     def _append(obj, out, chunk):
         if chunk_callback is not None:
             ret = chunk_callback(obj, args=[job[0].args for job in chunk],
@@ -185,11 +273,18 @@ def numba_vstack(arrays):
     return stacked
 
 
-def get_from_dict(dic, keys):
+def get_from_dict(dic, keys, need_all=False):
     ret = dict()
 
     for key in keys:
-        ret[key] = dic.get(key, None)
+        if need_all:
+            ret[key] = dic.get(key, None)
+        
+        elif not need_all and key in dic:
+            ret[key] = dic[key]
+
+        else:
+            pass
 
     return ret
 

@@ -5,6 +5,7 @@ interpolation_flags_CV2 = dict(linear=cv2.INTER_LINEAR, cubic=cv2.INTER_CUBIC,
                                nearest=cv2.INTER_NEAREST)
 interpolation_flags_skimage = dict(linear=1, nearest=0, cubic=3)
 
+
 def normalize(Im, qs=None):
     if qs is None:
         qs = [0, 1]
@@ -12,11 +13,13 @@ def normalize(Im, qs=None):
     Im = (Im - min_) / (max_ - min_)
     return Im
 
+
 def generate_control_points(img_shape, grid_spacing=20):
     """Generates a grid of control points."""
     h, w = img_shape
     y, x = np.mgrid[0:h:grid_spacing, 0:w:grid_spacing]
     return np.column_stack([x.ravel(), y.ravel()])  # Flatten to Nx2 shape
+
 
 def apply_piecewise_affine_transform(img, src_points, dst_points, interpolation_method):
     """Applies a piecewise affine transformation."""
@@ -30,9 +33,11 @@ def apply_piecewise_affine_transform(img, src_points, dst_points, interpolation_
 
     return warped, tformT
 
+
 def laplacian_highpass(img):
     """Applies a Laplacian filter to emphasize high frequencies."""
     return cv2.Laplacian(img, cv2.CV_64F)
+
 
 def identity_warp(image):
     """Applies an identity warp to introduce the same resampling artifacts."""
@@ -40,6 +45,7 @@ def identity_warp(image):
     identity_matrix = np.array([[1, 0, 0], [0, 1, 0]], dtype=np.float32)
     warped = cv2.warpAffine(image, identity_matrix, (w, h), flags=cv2.INTER_LINEAR)
     return warped
+
 
 def compute_mi(image1, image2, bins=64):
     """Computes Mutual Information (MI) between two images using a joint histogram."""
@@ -56,6 +62,7 @@ def compute_mi(image1, image2, bins=64):
 
     return mi
 
+
 def transform_matrix(params, initial_params, transform_type):
     """Creates either an affine (3x3) or projective (homography) transformation matrix."""
     if transform_type == 'affine':
@@ -68,6 +75,7 @@ def transform_matrix(params, initial_params, transform_type):
 
     else:
         raise ValueError("transform_type must be either 'affine' or 'projective'")
+
 
 def apply_transform(image, shape, params, initial_params, transform_type, interpolation_method):
     """Applies an affine or projective transformation."""
@@ -89,6 +97,7 @@ def apply_transform(image, shape, params, initial_params, transform_type, interp
     transformed_image[~valid_mask] = np.nan
     return transformed_image
 
+
 def ncc_with_exclusion(image1, image2, mask=None):
     """Computes the normalized cross-correlation (NCC) excluding NaN pixels."""
     if mask is None:
@@ -104,6 +113,7 @@ def ncc_with_exclusion(image1, image2, mask=None):
 
     return np.dot(image1_valid - mean1, image2_valid - mean2) / (N * std1 * std2)
 
+
 def ssd_with_exclusion(image1, image2, mask=None):
     """Computes the Sum of Squared Differences (SSD) excluding NaN pixels."""
     if mask is None:
@@ -116,6 +126,7 @@ def ssd_with_exclusion(image1, image2, mask=None):
     ssd = np.sqrt(np.sum((image1_valid - image2_valid) ** 2)) / (len(image1_valid) + 1e-2)  # Normalize by valid pixels
     return ssd
 
+
 def mi_with_exclusion(image1, image2, mask=None, bins=256):
     """Computes Mutual Information (MI) while ignoring NaN pixels."""
     if mask is None:
@@ -127,6 +138,7 @@ def mi_with_exclusion(image1, image2, mask=None, bins=256):
 
     return compute_mi(image1_valid, image2_valid, bins)
 
+
 def laplace_diff_with_exclusion(img1, img2, mask=None):
     img1_hf = laplacian_highpass(img1)
     img2_hf = laplacian_highpass(img2)
@@ -136,6 +148,7 @@ def laplace_diff_with_exclusion(img1, img2, mask=None):
         img2_hf = img2_hf[mask]
 
     return np.nanmean((img1_hf - img2_hf) ** 2)
+
 
 def objective_function(params, img1, img2, initial_params, transform_type,
                        interpolation_method='linear', metric='ssd'):
@@ -168,6 +181,7 @@ def objective_function(params, img1, img2, initial_params, transform_type,
     mask = ~np.logical_or(np.isnan(transformed_img1), np.isnan(transformed_img2))
     return get_loss(transformed_img1, transformed_img2, mask, metric)
 
+
 def get_loss(img1, img2, mask, metric):
     if metric == 'ncc':
         loss = 1 - ncc_with_exclusion(img1, img2, mask)
@@ -186,6 +200,7 @@ def get_loss(img1, img2, mask, metric):
 
     return loss  #loss + 0.5 * hf_loss
 
+
 def objective_function_piecewise_affine(params, img1, img2, initial_params, src_points, metric,
                                         interpolation_method):
     """Objective function for piecewise affine optimization."""
@@ -197,6 +212,7 @@ def objective_function_piecewise_affine(params, img1, img2, initial_params, src_
 
     mask = transformed_img1 > 0  # Exclude empty pixels
     return get_loss(transformed_img1, img2, mask, metric)
+
 
 def optimize_registration(img1, img2, initial_params, bounds, optim_params, transform_type,
                           interpolation_method='linear', metric='ssd',
@@ -210,6 +226,7 @@ def optimize_registration(img1, img2, initial_params, bounds, optim_params, tran
                       method='Nelder-Mead', bounds=bounds, options=optim_params)
     print(result)
     return result.x, result.success
+
 
 def optimize_registration_piecewise_affine(img1, img2, tformT, bounds, optim_params,
                                                interpolation_method='linear', metric='ncc',
@@ -253,6 +270,7 @@ def optimize_registration_piecewise_affine(img1, img2, tformT, bounds, optim_par
 
         print(result)
         return tformT, result.success
+
 
 def finetune_registration(img1, img2, tformT, transform_type='affine', interpolation_method='linear',
                           metric='ssd', points=None):

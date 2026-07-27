@@ -5,7 +5,11 @@
 #
 # SPDX-License-Identifier: GPL-3.0-or-later
 
-# flat field
+
+# Default values for incomplete configuration files. Refer to CONFIGURATION.md for a detailed explanation of each
+# parameter.
+
+
 flat_field:
   "757": "FFmap757.mat"
   "760": "FFmap760.mat"
@@ -15,7 +19,7 @@ radiance_calibration: "Radiometric Coefficient_25ms.mat"
 dark_acquisitions: ""
 
 KMat:
-  - [961, 0, 256]          # focal_length / (px_size * binning_factor) = 25 mm / (6.5 um * 2) = 
+  - [961, 0, 256]          # focal_length / (px_size * binning_factor) = 25 mm / (6.5 um * 2)
   - [0, 961, 256]    
   - [0, 0, 1] 
 
@@ -32,7 +36,7 @@ reflectance_calibration:
       R_04: 0.0401
       R_03: 0.0294
       R_02: 0.0202
-    panel_measurements: "/app/example_data/mixed_crops_13062021/MW_CalibRef_760.mat"
+    panel_measurements: "/app/example_data/01_mixed_crops_13062021/MW_CalibRef_760.mat"
 
   "757":
     reference:
@@ -45,7 +49,7 @@ reflectance_calibration:
       R_04: 0.0401
       R_03: 0.0294
       R_02: 0.0202
-    panel_measurements: "/app/example_data/mixed_crops_13062021/MW_CalibRef_757.mat"
+    panel_measurements: "/app/example_data/01_mixed_crops_13062021/MW_CalibRef_757.mat"
 
 mask: null
 

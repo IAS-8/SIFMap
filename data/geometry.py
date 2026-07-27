@@ -11,6 +11,9 @@ import scipy.optimize as scopt
 
 from data.data import spread_points
 
+import numba
+from numba import jit
+
 
 def RotX(a):
     # Compute a Rotation Matrix around X Axis of a Rads
@@ -88,7 +91,6 @@ def get_pose_from_absolute(IniH, MosaicOrigin, MosaicResolution, K):
     IniPose = []
     for no in range(nbrIm):
         H = IniH[no][:]
-        # K = M.Header.Datasets[M.Nodes[no].DatasetIndex].K
 
         Corners = np.array([[1, K[0, 2], K[0, 2], 1],
                             [K[1, 2], K[1, 2], 1, 1],
@@ -114,23 +116,6 @@ def get_pose_from_absolute(IniH, MosaicOrigin, MosaicResolution, K):
 
 
 def pose_lsq(Pose, K, H, Hs, Corners, Origin, Resolution, C_R_I, M_R_W, M_T_W):
-    """
-
-    Args:
-        Pose ():
-        K ():
-        H ():
-        Hs ():
-        Corners ():
-        Origin ():
-        Resolution ():
-        C_R_I ():
-        M_R_W ():
-        M_T_W ():
-
-    Returns:
-
-    """
     W_R_C = RotX(np.pi) @ RotZ(Pose[5] - np.pi / 2) @ RotY(Pose[4]) @ RotX(
         Pose[3])  # np.dot(np.dot(RotX(np.pi), np.dot(RotZ(Pose[5] - np.pi/2), np.dot(RotY(Pose[4]), RotX(Pose[3])))))
     W_R_I = np.dot(W_R_C, C_R_I)
@@ -164,7 +149,7 @@ def pose_lsq(Pose, K, H, Hs, Corners, Origin, Resolution, C_R_I, M_R_W, M_T_W):
 
 def convert_bundle_to_gmml(wHi, x, MosaicOrigin, MosaicResolution):
     """
-        this function converts the globally aligned motion parameters in 3D 
+        This function converts the globally aligned motion parameters in 3D
         to image-to-map 2D transformations
     Args:
         wHi (): image-to-world transformations
@@ -197,7 +182,6 @@ def convert_bundle_to_gmml(wHi, x, MosaicOrigin, MosaicResolution):
     IniPose = []
     for i in range(NumNodes):
         H = wHi[:, :, i]
-        # H = np.linalg.inv(H) #/ H[2, 2]
         HRes[i][:] = H / H[2, 2]
 
         vxi = x[IndexPoseVar]
@@ -294,19 +278,9 @@ def convert_bundle_to_data(M, data, KMat, MosaicOrigin):
 
 
 def set_resolution(HRes, res):
-    """
-
-    Args:
-        HRes ():
-        res ():
-
-    Returns:
-
-    """
     HRes = np.array(HRes)
     nbrIm = HRes.shape[0]
     H = np.array([[1 / res, 0, 0], [0, 1 / res, 0], [0, 0, 1]])
-    # HH = np.array([[res,0,0],[0,res, 0],[0, 0, 1]])
     for i in range(nbrIm):
         HRes[i][:] = H @ HRes[i][:]
         # HRes[i][:] = HRes[i][:] @ HH
@@ -314,14 +288,6 @@ def set_resolution(HRes, res):
 
 
 def RotMat2MobileRPY(R):
-    """
-
-    Args:
-        R ():
-
-    Returns:
-
-    """
     Px = np.sqrt(R[1, 2] ** 2 + R[2, 2] ** 2)
 
     if Px > 1e-8:
@@ -342,14 +308,6 @@ def RotMat2MobileRPY(R):
 
 
 def RotMat2FixedXYZ(R):
-    """
-
-    Args:
-        R ():
-
-    Returns:
-
-    """
     Px = np.sqrt(R[2, 1] ** 2 + R[2, 2] ** 2)
 
     if Px > 1e-8:
@@ -369,6 +327,7 @@ def RotMat2FixedXYZ(R):
     return G, B, A
 
 
+@jit(nopython=True, cache=True, parallel=False)
 def quat2rotmat(q):
     """
 
@@ -378,7 +337,7 @@ def quat2rotmat(q):
     Returns:
 
     """
-    R = np.eye(3, dtype=float)
+    R = np.eye(3, dtype=np.float64)
     q0, qx, qy, qz = q
     q02, qx2, qy2, qz2 = q0, qx, qy, qz
 
