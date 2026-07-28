@@ -17,7 +17,7 @@ The individual processing steps are implemented independently such that SIFMap m
 SIFMap exhibits a significant level of parallelization and efficiency increases due to cached _numba_ compilation. 
 
 
-## Outline of the SIFcam processing chain
+## Outline of the SIFMap processing chain
 ### SIFcam acquisition preprocessing
 The preprocessing step involves flat fielding (flat field correction), radiance calibration, and an atmospheric correction that gains reflectance at 760 and 757 nm and the SIF retrieval.
 The 757 and 760 nm image paired in this step to correct for viewing angle differences in the acquisitions of the two SIFcam cameras.
