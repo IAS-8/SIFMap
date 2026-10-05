@@ -170,7 +170,7 @@ bash docker/SIFMap_runner.sh -c .../path/to/env_config.sh example_data/01_mixed_
 to test your setup.
 
 We provide larger dataset examples [here](https://doi.org/10.26165/JUELICH-DATA/2KDXUL). 
-See the accompanying journal publication here (link will be updated) for SIFMap performance 
+See the accompanying journal publication [here](https://doi.org/10.1016/j.softx.2026.103065) for SIFMap performance 
 statistics reached on these datasets.
 
 
