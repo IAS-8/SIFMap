@@ -685,7 +685,8 @@ class SIFcam(_ImageData):
         Refl = np.polyval(p, rad)
 
         Refl[Refl > 1] = 1
-        Refl = np.abs(Refl)
+        # Refl = np.abs(Refl)
+        Refl = Refl.clip(0)
 
         p1 = np.polyfit(reflectance_reference, panel_radiance, 1)
         y1 = np.polyval(p1, ReflVek_R100)
