@@ -5,7 +5,7 @@
 #
 # SPDX-License-Identifier: GPL-3.0-or-later
 
-FROM python:3.11-slim-bullseye
+FROM python:3.11-slim-bookworm
 
 WORKDIR /app
 
@@ -20,7 +20,9 @@ RUN apt-get install libexpat1
 RUN apt-get install -y libgomp1 gcc
 
 # Install system dependencies required for GDAL
-RUN pip install --no-cache-dir -r requirements.txt
+RUN pip install --no-cache-dir -r requirements.txt \
+        && pip uninstall -y opencv-python opencv-contrib-python \
+        && pip install --no-cache-dir --force-reinstall opencv-python-headless==4.13.0.92
 
 #Data transfer by copying
  # cd to project folder

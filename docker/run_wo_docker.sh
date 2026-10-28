@@ -297,7 +297,9 @@ case "$COMMAND" in
 
     preprocess)
 
-        exec "$REPO_DIR/run_UAV_preprocessing.sh" "$TMP_CONFIG_OUT"
+         exec "$PYTHON" \
+		"$REPO_DIR/run_UAV_preprocessing.py" \
+		"$TMP_CONFIG_OUT"
 
         ;;
 

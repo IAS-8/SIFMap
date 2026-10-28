@@ -420,9 +420,10 @@ def outlier_analysis(data, residuals, x=None, outlier_threshold=5,
             SubRes = rr[ff::4]
             Ix = np.where(np.abs(SubRes) > m[ff] + NumStDev[ff] * s[ff])[0]
             RemID = np.unique(np.concatenate((RemID, Ix)))
-              
-        data.remove_correspondence(Im1, Im2, correspondence_id=RemID)
-        n_removals += len(RemID)
+        
+        if len(RemID) > 0:
+            data.remove_correspondence(Im1, Im2, correspondence_id=RemID)
+            n_removals += len(RemID)
         
     if adapt_x:
         remove = data.update_matches(min_n_correspondences=min_n_correspondences,

@@ -45,7 +45,7 @@ def feature_matcher_flann_init(im1, im2, flann=None):
 def feature_matcher_flann(features1, features2, valid_points1, valid_points2,
                           img1=None, img2=None, flann='FLANNBasedMatcher', 
                           th=0.5, alignment_dim=2, min_samples=4, transform_type=None, 
-                          stop_sample_num=np.inf):
+                          stop_sample_num=np.inf, camera_matrix=None):
     """
 
     Args:
@@ -83,19 +83,7 @@ def feature_matcher_flann(features1, features2, valid_points1, valid_points2,
     min_samples_ransac = 3 * int(alignment_dim <= 2) + 4 * int(alignment_dim > 2)
 
     if transform_type == 'epipolar':
-        tformT, inliers, status = epipolar_pose_and_depth_estimation(matched_points1, matched_points2,
-                                                                     camera_matrix=camera_matrix, ransac_thresh=th, 
-                                                                     img1=img1, img2=img2)
-
-        if status == 0:
-            matched_points1 = matched_points1[inliers]
-            matched_points2 = matched_points2[inliers]
-
-        else:
-            matched_points1 = []
-            matched_points2 = []
-
-        return tformT, status, matched_points1, matched_points2
+        model = ProjectiveTransform
       
     elif transform_type in ('affine', ):
         model = AffineTransform
@@ -113,49 +101,61 @@ def feature_matcher_flann(features1, features2, valid_points1, valid_points2,
     else:
         raise NotImplementedError()
     
+    success = False
     if len(matched_points1) > min_samples_ransac:
         # robustly estimate transform model with RANSAC
-        tformT, inliers = ransac(
+        tform_pre, inliers_pre = ransac(
             (matched_points1, matched_points2), model,
-            min_samples=min_samples_ransac, residual_threshold=th, 
+            min_samples=min_samples_ransac, 
+            residual_threshold=th, # Dieser Threshold ist in Pixeln
             stop_sample_num=stop_sample_num,
             max_trials=2500 * 5
         )
-
-        if inliers is not None and np.sum(inliers) > min_samples and tformT:
-            # Order inliers by quality
-            residuals = tformT.residuals(matched_points1, matched_points2)
-            inlier_residuals = residuals[inliers]
+        
+        if inliers_pre is not None and np.sum(inliers_pre) > min_samples_ransac:
+            # Punkte filtern und nach Qualität sortieren
+            residuals = tform_pre.residuals(matched_points1, matched_points2)
+            inlier_residuals = residuals[inliers_pre]
             order = np.argsort(inlier_residuals)
 
-            # Sorted inlier points
-            matched_points1 = matched_points1[inliers][order]
-            matched_points2 = matched_points2[inliers][order]
-
-            if Version(skimage.__version__) >= Version("0.26"):
-                model = ProjectiveTransform.from_estimate(
-                    matched_points1,
-                    matched_points2,
-                )
-                success = bool(model)
-            else:
-                model = ProjectiveTransform()
-                success = model.estimate(matched_points1, matched_points2)
-
-            if transform_type in ('affine', 'projective', 'similarity') and success:
-                tformT = np.asarray(model.params)
-
-            else:
-                tformT = model
-
-            status = 0 if success is True else 1
-
+            matched_points1 = matched_points1[inliers_pre][order]
+            matched_points2 = matched_points2[inliers_pre][order]
+            success = True
+            
         else:
+            # Nicht genug Inlier im ersten Schritt
             tformT = None
             status = 2
             matched_points1 = []
             matched_points2 = []
 
+    if success and transform_type == 'epipolar':
+        tformT, inliers, status = epipolar_pose_and_depth_estimation(matched_points1, matched_points2,
+                                                                     camera_matrix=camera_matrix, thr=th, 
+                                                                     img1=img1, img2=img2)
+
+        return tformT, status, matched_points1, matched_points2
+
+    elif success and inliers_pre is not None and np.sum(inliers_pre) > min_samples and tform_pre:
+        if Version(skimage.__version__) >= Version("0.26"):
+            m = model.from_estimate(
+                matched_points1,
+                matched_points2,
+            )
+            success = bool(m)
+        else:
+            m = model()
+            success = m.estimate(matched_points1, matched_points2)
+
+        if transform_type in ('affine', 'projective', 'similarity') and success:
+            tformT = np.asarray(m.params)
+
+        else:
+            tformT = m
+
+        status = 0 if success is True else 1
+
+        
     else:
         tformT = None
         status = 3
@@ -166,7 +166,8 @@ def feature_matcher_flann(features1, features2, valid_points1, valid_points2,
 
 
 def accurate_image_matcher(Im757, Im760, flann, mask=None, transform_type=None, min_samples=4,
-                           finetune_metric=False, interpolation_method='linear', n_features=50000):
+                           finetune_metric=False, interpolation_method='linear', n_features=50000, 
+                           camera_matrix=None):
 
 
     features757, validPoints757, status = run_SIFT(Im757.copy(), n_features)
@@ -185,7 +186,8 @@ def accurate_image_matcher(Im757, Im760, flann, mask=None, transform_type=None, 
                                                               th=flann['ransac_residual_threshold'],
                                                               alignment_dim=flann.get('alignment_dim', 3), 
                                                               min_samples=min_samples,
-                                                              transform_type=transform_type)
+                                                              transform_type=transform_type, 
+                                                              camera_matrix=camera_matrix)
     
     if finetune_metric is not None and tformT is not None:
         new_tformT = finetune_registration(Im757, Im760, tformT, transform_type=transform_type,

@@ -1,0 +1,19 @@
+defaults:
+  - default
+
+train_dir:
+  - 01_complete_datasets/03_processed/all_15m/proj/240607/flight2_prepared_by_sofia_choza
+  - 01_complete_datasets/03_processed/all_15m/proj/240608/flight1_prepared_by_sofia_choza
+  - 01_complete_datasets/03_processed/all_15m/proj/240608/flight3_prepared_by_sofia_choza
+  - 01_complete_datasets/03_processed/all_15m/proj/240715/flight2_prepared_by_sofia_choza
+  - 01_complete_datasets/03_processed/all_15m/proj/240715/flight3_prepared_by_sofia_choza
+  - 01_complete_datasets/03_processed/all_15m/proj/240725/flight2_prepared_by_sofia_choza
+  - 01_complete_datasets/03_processed/all_15m/proj/240725/flight3_prepared_by_sofia_choza
+  - 01_complete_datasets/03_processed/all_15m/proj/240812/flight2_prepared_by_sofia_choza
+  - 01_complete_datasets/03_processed/all_15m/proj/240828/flight1_prepared_by_sofia_choza
+  - 01_complete_datasets/03_processed/all_15m/proj/240828/flight3_prepared_by_sofia_choza
+  - 01_complete_datasets/03_processed/all_15m/proj/240918/flight2_prepared_by_sofia_choza
+val_dir:
+  - 01_complete_datasets/03_processed/all_15m/proj/240828/flight2_prepared_by_sofia_choza
+  - 01_complete_datasets/03_processed/all_15m/proj/240828/flight3_prepared_by_sofia_choza
+

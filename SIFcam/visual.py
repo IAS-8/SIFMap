@@ -104,10 +104,17 @@ def plot_and_save(aggregates, result_path, tif_dtype=np.int16):
     arr = []
     band_names = []
     for key, val_sparse in aggregates.items():
+
         if is_sparse(val_sparse):
             val = densify(val_sparse, fill_value=np.nan)
         else:
             val = val_sparse
+        
+        if key not in csv_keys and val.shape[0] < val.shape[1]:
+            orientation = 'horizontal'
+
+        else:
+            orientation = 'vertical'
 
         if key in csv_keys:
             with open(pjoin(result_path, f'{key}.csv'), 'w', newline='') as file:
@@ -123,7 +130,7 @@ def plot_and_save(aggregates, result_path, tif_dtype=np.int16):
             cmap = get_discrete_colormap(val)
 
             plt.imshow(val, cmap=cmap, interpolation='bilinear')
-            plt.colorbar()
+            plt.colorbar(orientation=orientation)
 
         elif np.any([c in key for c in discrete_keys]):
             arr.append(safe_cast(val, tif_dtype, -9999))
@@ -131,7 +138,7 @@ def plot_and_save(aggregates, result_path, tif_dtype=np.int16):
 
             vmin, vmax = None, None
             plt.imshow(val, cmap='viridis', interpolation='bilinear', vmin=vmin, vmax=vmax)
-            plt.colorbar()
+            plt.colorbar(orientation=orientation)
 
         else:
             if 'closest_dist' == key:
@@ -143,11 +150,14 @@ def plot_and_save(aggregates, result_path, tif_dtype=np.int16):
                 band_names.append(f'{key} * 1000')
 
             vmin, vmax = np.nanquantile(val.flatten(), [0.01, 0.99])
+            if 'sif' in key:
+                vmin = 0
+
             plt.imshow(val, cmap='viridis', interpolation='bilinear', vmin=vmin, vmax=vmax)
-            plt.colorbar()
+            plt.colorbar(orientation=orientation)
 
         plt.title(key)
-        plt.savefig(fname=pjoin(result_path, f'{key}.png'), dpi=300)
+        plt.savefig(fname=pjoin(result_path, f'{key}.png'), dpi=600)
         plt.close()
 
     return np.asarray(arr), band_names
@@ -737,7 +747,7 @@ def create_output_tifs_with_gdal(*input_paths, projective_matrix, output, transf
         height, width = image.shape[1], image.shape[2]
          
         warped_image = cv2.warpPerspective(image, transform, (width, height), 
-                                           flags=interpolation_flags_CV2[rescale_interpolation_method],
+                                           flags=interpolation_flags_CV2[pairing_rescale_interpolation_method],
                                            borderMode=cv2.BORDER_REPLICATE)
         
         # Now, save the transformed image

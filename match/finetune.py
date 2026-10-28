@@ -27,10 +27,6 @@ def apply_piecewise_affine_transform(img, src_points, dst_points, interpolation_
     tform.estimate(src_points, dst_points)
     warped = transform.warp(img, tform, output_shape=img.shape,
                             order=interpolation_flags_skimage[interpolation_method])
-
-    # Convert NaNs to zeros (same behavior as cv2.warpAffine)
-    #warped[np.isnan(warped)] = 0
-
     return warped, tformT
 
 
@@ -85,10 +81,6 @@ def apply_transform(image, shape, params, initial_params, transform_type, interp
     else:
         matrix = params
 
-    #if transform_type == 'affine':
-    #    transformed_image = cv2.warpAffine(image, matrix[:2, :], (image.shape[1], image.shape[0]),
-    #                                       flags=interpolation_flags_CV2[interpolation_method])
-    #else:
     transformed_image = cv2.warpPerspective(image, matrix, (shape[1], shape[0]),
                                             flags=interpolation_flags_CV2[interpolation_method])
 

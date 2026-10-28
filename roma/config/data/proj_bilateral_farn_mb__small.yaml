@@ -1,0 +1,19 @@
+defaults:
+  - default
+
+train_dir:
+  #- 01_complete_datasets/03_processed/all_15m/proj_bilateral_farn_mb/240607/flight2_prepared_by_sofia_choza
+  - 01_complete_datasets/03_processed/all_15m/proj_bilateral_farn_mb/240608/flight1_prepared_by_sofia_choza
+  #- 01_complete_datasets/03_processed/all_15m/proj_bilateral_farn_mb/240608/flight3_prepared_by_sofia_choza
+  - 01_complete_datasets/03_processed/all_15m/proj_bilateral_farn_mb/240715/flight2_prepared_by_sofia_choza
+  #- 01_complete_datasets/03_processed/all_15m/proj_bilateral_farn_mb/240715/flight3_prepared_by_sofia_choza
+  - 01_complete_datasets/03_processed/all_15m/proj_bilateral_farn_mb/240725/flight2_prepared_by_sofia_choza
+  #- 01_complete_datasets/03_processed/all_15m/proj_bilateral_farn_mb/240725/flight3_prepared_by_sofia_choza
+  - 01_complete_datasets/03_processed/all_15m/proj_bilateral_farn_mb/240812/flight2_prepared_by_sofia_choza
+  #- 01_complete_datasets/03_processed/all_15m/proj_bilateral_farn_mb/240828/flight1_prepared_by_sofia_choza
+  - 01_complete_datasets/03_processed/all_15m/proj_bilateral_farn_mb/240828/flight3_prepared_by_sofia_choza
+  - 01_complete_datasets/03_processed/all_15m/proj_bilateral_farn_mb/240918/flight2_prepared_by_sofia_choza
+val_dir:
+  - 01_complete_datasets/03_processed/trial_sofia_20260828/240828/flight2_prepared_by_sofia_choza
+  - 01_complete_datasets/03_processed/trial_sofia_20260828/240828/flight3_prepared_by_sofia_choza
+

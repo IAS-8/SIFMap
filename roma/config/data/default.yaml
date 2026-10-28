@@ -1,0 +1,10 @@
+cam760_regex: '.*?(C1).*'
+cam757_regex: '.*?(C2).*'
+datatake_regex: '.*?(\d+)\.tif$'
+master_band: Rad757
+divide_by: 1000
+batch_size: 1
+num_workers: 4
+tile_size: null
+sharpness_top_k: null
+sharpness_min_pct: null

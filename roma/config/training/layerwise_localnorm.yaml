@@ -1,0 +1,20 @@
+defaults:
+  - default
+
+train_stage: ['1', '2', '4']
+use_lora: false
+mlflow_experiment: layerwise_localnorm_training 
+
+loss:
+  loss_type: gradient            # pixel | gradient | blur_robust | ssim | mixed
+  norm_mode: local           # global | local | none
+  local_norm_window: 32
+  gradient_kernel: 5          # 3 (Sobel) | 5 (Scharr)
+  ssim_window: 11
+  w_pixel: 1.0                # nur für loss_type=mixed relevant
+  w_gradient: 0.0
+  w_ssim: 0.0
+  w_blur: 0.0
+  cert_supervision: floor     # floor | cycle | both | none
+  multi_scale: false
+  coarse_scale: 16

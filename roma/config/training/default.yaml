@@ -1,0 +1,35 @@
+amp_dtype: float32
+lora_cfg: null
+patience: 10
+min_delta: 1.0e-4
+lr: 5e-5
+cycle_weight: 1.0
+cert_floor: 0.35
+cert_reg_weight: 1.0
+epochs: 100
+grad_clip: 1.0
+val_every: 1
+save_top_k: 1
+save_every_n_epochs: 1
+mlflow_experiment: test
+accelerator: null
+init_from: null
+resume_from: null
+
+loss:
+  loss_type: pixel            # pixel | gradient | blur_robust | ssim | mixed
+  norm_mode: global           # global | local | none
+  local_norm_window: 32
+  blur_sigma: 3.0
+  gradient_kernel: 3          # 3 (Sobel) | 5 (Scharr)
+  ssim_window: 11
+  w_pixel: 1.0                # nur für loss_type=mixed relevant
+  w_gradient: 0.0
+  w_ssim: 0.0
+  w_blur: 0.0
+  cert_supervision: floor     # floor | cycle | both | none
+  multi_scale: false
+  coarse_scale: 16
+  w_gen_cons: 0.0
+  w_gen_var: 0.0
+  gen_var_floor: 0.1

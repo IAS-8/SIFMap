@@ -5,6 +5,33 @@ import yaml
 import numpy as np
 import json
 
+def load_hparams_from_ckpt(ckpt_dir):
+    """
+    ckpt_dir: Verzeichnis mit .ckpt (z.B. last.ckpt / best).
+    Gibt die im Checkpoint gespeicherten hparams als dict zurück,
+    OHNE das Modell zu instanziieren.
+    """
+
+    import os
+    import glob
+    import torch
+
+    if os.path.isfile(ckpt_dir):
+        ckpt_path = ckpt_dir
+    else:
+        cands = sorted(glob.glob(os.path.join(ckpt_dir, '*.ckpt')))
+        if not cands:
+            raise FileNotFoundError(f'No .ckpt found in {ckpt_dir}')
+        # last.ckpt bevorzugen, sonst neueste
+        last = [c for c in cands if c.endswith('last.ckpt')]
+        ckpt_path = last[0] if last else cands[-1]
+
+    obj = torch.load(ckpt_path, map_location='cpu', weights_only=False)
+    hparams = dict(obj.get('hyper_parameters', {}))
+    hparams['_ckpt_path'] = ckpt_path   # zur Nachverfolgung
+    return hparams
+
+
 def prepare_numba_import(n_threads):
     n_threads = str(n_threads)
     for var in ("NUMBA_NUM_THREADS",
@@ -16,7 +43,8 @@ def prepare_numba_import(n_threads):
     os.environ["NUMBA_THREADING_LAYER"] = "omp"
 
 
-def run_preprocessing(data_params, preproc_params, sensor_params, flann, parallel_params, feature_params, **kwargs):
+def run_preprocessing(data_params, preproc_params, sensor_params, flann, parallel_params, feature_params, 
+                      roma_params, **kwargs):
     # 0. Prepare run ###################################################################################################
     print("#####################################################################")
     print("Preparing Run \n")
@@ -45,10 +73,12 @@ def run_preprocessing(data_params, preproc_params, sensor_params, flann, paralle
                       **feature_params,
                       sensor_params=sensor_params,
                       flann=flann,
-                      parallel_params=parallel_params).compute(**preproc_params)
+                      parallel_params=parallel_params, 
+                      roma_config=roma_params).compute(**preproc_params)
 
 
-def run_radiance_preprocessing(data_params, preproc_params, sensor_params, flann, parallel_params, feature_params, **kwargs):
+def run_radiance_preprocessing(data_params, preproc_params, sensor_params, flann, parallel_params, feature_params, 
+                               roma_params, **kwargs):
     # 0. Prepare run ###################################################################################################
     print("#####################################################################")
     print("Preparing Run \n")
@@ -77,12 +107,13 @@ def run_radiance_preprocessing(data_params, preproc_params, sensor_params, flann
                       **feature_params,
                       sensor_params=sensor_params,
                       flann=flann,
-                      parallel_params=parallel_params).compute_radiance(**preproc_params)
+                      parallel_params=parallel_params, 
+                      roma_config=roma_params).compute_radiance(**preproc_params)
 
 
 
 def run(data_params, preproc_params, register_params, align_params, sensor_params,
-        visualization_params, flann, parallel_params, feature_params, **kwargs):
+        visualization_params, flann, parallel_params, feature_params, roma_params, **kwargs):
 
     # 0. Prepare run ###################################################################################################
     print("#####################################################################")
@@ -124,7 +155,8 @@ def run(data_params, preproc_params, register_params, align_params, sensor_param
                       **feature_params,
                       sensor_params=sensor_params,
                       flann=flann,
-                      parallel_params=parallel_params).compute(**preproc_params)
+                      parallel_params=parallel_params, 
+                      roma_config=roma_params).compute(**preproc_params)
 
     print("#####################################################################\n")
     ####################################################################################################################
@@ -253,11 +285,13 @@ def read_params(config_file, need_all=False):
     # PREPROC params
     if 'preprocessing_params' in config:
         required_preproc_params = ('load_data', 'load_features', 'write', 'keep_data_in_memory',
-                                   'ransac_residual_threshold', 'rescale_interpolation_method',
+                                   'ransac_residual_threshold', 'pairing_rescale_interpolation_method',
                                    'interpolation_method', 'pairing_min_samples',
                                    'pairing_transform_type', 'pairing_finetune_metric',
                                    'pairing_master_band', 'pairing_optical_flow_refinement',
-                                   'radiance_gaussian_blur', 'sif_computation_method')
+                                   'radiance_gaussian_blur', 'sif_computation_method',
+                                   'radiance_blur_config', 'pairing_motion_blur_estimation',
+                                   'pairing_pad_aligned_channels')
         preproc_params = get_from_dict(config['preprocessing_params'], required_preproc_params, need_all)
 
     else:
@@ -326,6 +360,22 @@ def read_params(config_file, need_all=False):
         feature_params = dict()
 
 
+    # ROMA params
+    if 'roma_params' in config:
+        roma_params = config['roma_params']
+
+        if roma_params is None:
+            roma_params = dict()
+        
+        if roma_params.get('ckpt', None):
+            ckpt_hparams = load_hparams_from_ckpt(roma_params['ckpt'])
+
+            # Merge: Config-Werte gewinnen über Checkpoint-Werte
+            roma_params = {**ckpt_hparams, **roma_params}
+
+    else:
+        roma_params = dict()
+
     out_dict = dict(sensor_params=sensor_params,
                     data_params=data_params,
                     preproc_params=preproc_params,
@@ -334,7 +384,8 @@ def read_params(config_file, need_all=False):
                     visualization_params=vis_params,
                     flann=flann,
                     parallel_params=parallel_params,
-                    feature_params=feature_params
+                    feature_params=feature_params, 
+                    roma_params=roma_params
                     )
 
     return out_dict

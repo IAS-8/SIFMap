@@ -1,0 +1,10 @@
+coarse_res: 560
+upsample_size: 1024
+clahe: true
+symmetric: false
+on_matched: true
+warp_mode: 'bicubic'
+
+channel_mode: replicate   # "replicate" | "learned"
+gen_base_ch: 32
+gen_depth: 4

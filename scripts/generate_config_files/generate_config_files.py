@@ -76,6 +76,17 @@ def adjust_path(path, data_dir=None, app_dir=None, user_dir=None):
     return path
 
 
+def adjust_paths_in_dict(d, data_dir=None, app_dir=None, user_dir=None):
+    """Passt rekursiv alle String-Werte in einem dict/list über adjust_path an."""
+    if isinstance(d, dict):
+        return {k: adjust_paths_in_dict(v, data_dir, app_dir, user_dir) for k, v in d.items()}
+    if isinstance(d, list):
+        return [adjust_paths_in_dict(v, data_dir, app_dir, user_dir) for v in d]
+    if isinstance(d, str):
+        return adjust_path(d, data_dir, app_dir, user_dir)
+    return d
+
+
 def generate_config_pair(default_config_file, default_sensor_calib_file, calib_dir, 
                          raw_data_dir, out_processing_dir, data_dir, app_dir, user_dir):
 
@@ -101,6 +112,12 @@ def generate_config_file(default_config_file, raw_data_dir, out_processing_dir,
     default['data_params']['dataset_path'] = raw_data_dir
     default['data_params']['result_path'] = out_processing_dir  
     default['sensor_calibration_config'] = 'sensor_calib.yaml'
+
+    # roma_params (z.B. ckpt) ebenfalls auf Mount-Pfade mappen
+    if 'roma_params' in default:
+        default['roma_params'] = adjust_paths_in_dict(
+            default['roma_params'], data_dir, app_dir, user_dir
+        )
 
     return default
     
@@ -158,10 +175,10 @@ def generate_sensor_calib_file(default_sensor_calib_path, calib_dir, raw_data_di
                     [0, 0, 1]]
         
         else:
-            raise NotImplemtentedError()
+            raise NotImplementedError()
         
         default['KMat'] = kmat
-        default['mask'] = None
+        #default['mask'] = None
     
     except Exception as e:
         traceback.print_exc()

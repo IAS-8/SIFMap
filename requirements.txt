@@ -13,4 +13,10 @@ scikit-learn
 jupyter
 shapely
 intel-openmp
+torchvision
+torch==2.6
+romatch
+pytorch_lightning
+hydra-core
+mlflow==2.20.3
 

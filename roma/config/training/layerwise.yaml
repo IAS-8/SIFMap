@@ -1,0 +1,7 @@
+defaults:
+  - default
+
+train_stage: ['1', '2', '4']
+use_lora: false
+mlflow_experiment: layerwise_training 
+

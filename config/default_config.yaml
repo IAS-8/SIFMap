@@ -31,10 +31,15 @@ preprocessing_params:
   pairing_transform_type: 'projective'
   pairing_master_band: 'Rad757'
   pairing_optical_flow_refinement: 'farneback'
+  pairing_motion_blur_estimation: false
   interpolation_method: 'cubic'
-  rescale_interpolation_method: null
+  pairing_rescale_interpolation_method: null
+  pairing_pad_aligned_channels: false
   sif_computation_method: 'fld'
   radiance_gaussian_blur:
+    '760': null
+    '757': null
+  radiance_blur_config:
     '760': null
     '757': null
 
@@ -81,6 +86,9 @@ parallel_params:
   do_parallel: true
   n_processes: 32
   n_threads: 24
+  
+
+roma_params: null
 
 
 vis_params:

@@ -1,0 +1,12 @@
+defaults:
+  - default
+
+train_stage: null
+use_lora: true
+mlflow_experiment: lora_training
+lora_cfg:
+  r: 8
+  alpha: 16
+  dropout: 0.05
+  target_modules: ["qkv", "fc1", "fc2"]
+

@@ -23,7 +23,7 @@ from scipy import sparse
 from scipy.optimize import curve_fit
 
 from sklearn.base import BaseEstimator, TransformerMixin
-
+from skimage import io, transform 
 
 import functools
 import os
@@ -197,6 +197,59 @@ def init_with_valid_kwargs(cls, *args, **kwargs):
 
     return cls(*args, **valid_kwargs)
 
+
+def save(arrs, filnames, save_with='tif', dtype=None, cast_to_int=True):
+    for arr, fil in zip(arrs, filnames):
+        os.makedirs(os.path.dirname(fil), exist_ok=True)
+
+        if cast_to_int:
+            mask = np.isnan(arr)
+            arr[mask] = 0
+            arr = cast_to_int_type(arr * 1000)
+            arr[mask] = np.iinfo(np.int16).min
+
+        if np.issubdtype(arr.dtype, np.floating) and np.any(np.isnan(arr)):
+            arr = arr.copy()
+            arr[np.isnan(arr)] = -9999
+
+        if save_with == 'npy':
+            if dtype is not None:
+                np.save(fil, arr.astype(dtype), allow_pickle=False)
+
+            else:
+                np.save(fil, arr, allow_pickle=False)
+
+        elif save_with == 'cv2':
+            cv2.imwrite(fil, arr)
+
+        elif save_with == 'tif':
+            if dtype is not None:
+                arr = arr.astype(dtype)
+
+            io.imsave(fil, arr)
+
+        else:
+            raise ValueError(f'"{save_with}" is not a valid save_with argument')
+
+    return filnames
+
+
+def load_image(filname, divide_by=1000, **kwargs):
+    if filname.endswith('npy'):
+        arr = np.load(filname)
+
+    else:
+        arr = io.imread(filname, **kwargs)
+
+    if np.issubdtype(arr.dtype, np.floating):
+        arr[arr < -1000] = np.nan
+
+    if divide_by is not None:
+        mask = arr < np.iinfo(np.int16).min + 1000
+        arr = arr.astype(float) / divide_by
+        arr[mask] = np.nan
+
+    return arr
 
 def convert_to_numba_list_of_lists(jagged_array, default_value=None):
     """

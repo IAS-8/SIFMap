@@ -9,5 +9,5 @@ bash scripts/generate_config_files/generate_config_files.sh \
 bash scripts/generate_config_files/generate_config_files.sh \
 	-s .../dataset_config.sh \
 	-c .../path/to/dataset_dir/03_processed \ 
-	-o test_runs \
+	-o test_runs
 
